@@ -40,7 +40,6 @@
 
 #include "vtespawn.hh"
 #include "vteutils.h"  /* for strchrnul on non-GNU systems */
-#include "reaper.hh"
 
 #define VTE_SPAWN_ERROR_TIMED_OUT (G_SPAWN_ERROR_FAILED + 1000)
 #define VTE_SPAWN_ERROR_CANCELLED (G_SPAWN_ERROR_FAILED + 1001)
@@ -948,9 +947,19 @@ fork_exec_with_pipes (gboolean              intermediate_child,
    */
 
   if (pid > 0)
-    {
-      vte_reaper_add_child(pid);
-     }
+  {
+    wait_failed:
+     if (waitpid (pid, NULL, 0) < 0)
+       {
+          if (errno == EINTR)
+            goto wait_failed;
+          else if (errno == ECHILD)
+            ; /* do nothing, child already reaped */
+          else
+            g_warning ("waitpid() should not fail in "
+                       "'fork_exec_with_pipes'");
+       }
+   }
 
   close_and_invalidate (&child_err_report_pipe[0]);
   close_and_invalidate (&child_err_report_pipe[1]);
