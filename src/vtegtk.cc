@@ -68,6 +68,8 @@ struct _VteTerminalClassPrivate {
         GtkStyleProvider *style_provider;
 };
 
+typedef vte::terminal::Terminal VteTerminalPrivate;
+
 #ifdef VTE_DEBUG
 G_DEFINE_TYPE_WITH_CODE(VteTerminal, vte_terminal, GTK_TYPE_WIDGET,
                         G_ADD_PRIVATE(VteTerminal)
@@ -83,7 +85,7 @@ G_DEFINE_TYPE_WITH_CODE(VteTerminal, vte_terminal, GTK_TYPE_WIDGET,
                         G_IMPLEMENT_INTERFACE(GTK_TYPE_SCROLLABLE, NULL))
 #endif
 
-#define IMPL(t) (reinterpret_cast<VteTerminalPrivate*>(vte_terminal_get_instance_private(t)))
+#define IMPL(t) (reinterpret_cast<vte::terminal::Terminal*>(vte_terminal_get_instance_private(t)))
 
 guint signals[LAST_SIGNAL];
 GParamSpec *pspecs[LAST_PROP];
@@ -99,7 +101,7 @@ valid_color(GdkRGBA const* color)
                color->alpha >= 0. && color->alpha <= 1.;
 }
 
-VteTerminalPrivate *_vte_terminal_get_impl(VteTerminal *terminal)
+vte::terminal::Terminal* _vte_terminal_get_impl(VteTerminal *terminal)
 {
         return IMPL(terminal);
 }
@@ -377,7 +379,7 @@ vte_terminal_init(VteTerminal *terminal)
 
 	/* Initialize private data. NOTE: place is zeroed */
 	place = vte_terminal_get_instance_private(terminal);
-        new (place) VteTerminalPrivate(terminal);
+        new (place) vte::terminal::Terminal(terminal);
 
         gtk_widget_set_has_window(&terminal->widget, FALSE);
 }
@@ -387,7 +389,7 @@ vte_terminal_finalize(GObject *object)
 {
     	VteTerminal *terminal = VTE_TERMINAL (object);
 
-        IMPL(terminal)->~VteTerminalPrivate();
+        IMPL(terminal)->~Terminal();
 
 	/* Call the inherited finalize() method. */
 	G_OBJECT_CLASS(vte_terminal_parent_class)->finalize(object);
