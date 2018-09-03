@@ -3161,8 +3161,8 @@ void
 Terminal::DECPCTERM_OR_XTERM_RPM(vte::parser::Sequence const& seq)
 {
         /*
-         * There's a conflict between DECPCTERM and XTERM-RPM.
-         * XTERM-RPM takes a single argument, DECPCTERM takes 2.
+         * There's a conflict between DECPCTERM and XTERM_RPM.
+         * XTERM_RPM takes a single argument, DECPCTERM takes 2.
          * Note that since both admit default values (which may be
          * omitted at the end of the sequence), this only an approximation.
          */
@@ -8112,7 +8112,7 @@ void
 Terminal::XTERM_RPM(vte::parser::Sequence const& seq)
 {
         /*
-         * XTERM_RPM - xterm-restore-private-mode
+         * XTERM_RPM - xterm restore DEC private mode
          *
          * Defaults: none
          *
@@ -8166,7 +8166,7 @@ void
 Terminal::XTERM_SPM(vte::parser::Sequence const& seq)
 {
         /*
-         * XTERM_SPM - xterm-set-private-mode
+         * XTERM_SPM - xterm save DEC private mode
          *
          * Defaults: none
          *
@@ -8174,6 +8174,20 @@ Terminal::XTERM_SPM(vte::parser::Sequence const& seq)
          */
 
         save_mode_private(seq, true);
+}
+
+void
+Terminal::XTERM_PTRMODE(vte::parser::Sequence const& seq)
+{
+        /*
+         * XTERM_PTRMODE - xterm set pointer mode
+         *
+         * Defaults: none
+         *
+         * References: XTERM
+         *
+         * Probably not worth implementing.
+         */
 }
 
 void
