@@ -324,6 +324,11 @@ private:
 };
 
 namespace vte {
+
+namespace platform {
+class Widget;
+}
+
 namespace terminal {
 
 class Terminal {
