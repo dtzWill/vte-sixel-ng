@@ -69,8 +69,6 @@ struct _VteTerminalClassPrivate {
         GtkStyleProvider *style_provider;
 };
 
-typedef vte::terminal::Terminal VteTerminalPrivate;
-
 #ifdef VTE_DEBUG
 G_DEFINE_TYPE_WITH_CODE(VteTerminal, vte_terminal, GTK_TYPE_WIDGET,
                         {
@@ -120,11 +118,6 @@ valid_color(GdkRGBA const* color)
                color->green >= 0. && color->green <= 1. &&
                color->blue >= 0. && color->blue <= 1. &&
                color->alpha >= 0. && color->alpha <= 1.;
-}
-
-vte::terminal::Terminal* _vte_terminal_get_impl(VteTerminal *terminal)
-{
-        return IMPL(terminal);
 }
 
 static void
