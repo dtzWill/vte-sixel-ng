@@ -3792,7 +3792,7 @@ skip_chunk:
 }
 
 void
-VteTerminalPrivate::feed_chunks(struct _vte_incoming_chunk *chunks)
+Terminal::feed_chunks(struct _vte_incoming_chunk *chunks)
 {
 	struct _vte_incoming_chunk *last;
 
