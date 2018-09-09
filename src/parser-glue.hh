@@ -60,7 +60,7 @@ public:
 
 protected:
         struct vte_parser m_parser;
-};
+}; // class Parser
 
 class Sequence {
 public:
@@ -127,6 +127,17 @@ public:
                 return VTE_CHARSET_GET_SLOT(m_seq->charset);
         }
 
+        /* introducer:
+         *
+         * This is the character introducing the sequence, if any.
+         *
+         * Returns: the introducing character
+         */
+        inline constexpr uint32_t introducer() const noexcept
+        {
+                return m_seq->introducer;
+        }
+
         /* terminator:
          *
          * This is the character terminating the sequence, or, for a
@@ -137,6 +148,18 @@ public:
         inline constexpr uint32_t terminator() const noexcept
         {
                 return m_seq->terminator;
+        }
+
+
+        /* is_c1:
+         *
+         * Whether the sequence was introduced with a C0 or C1 control.
+         *
+         * Returns: the introducing character
+         */
+        inline constexpr bool is_c1() const noexcept
+        {
+                return (introducer() & 0x80) != 0;
         }
 
         // FIXMEchpe: upgrade to C++17 and use the u32string_view version below, instead
@@ -379,7 +402,7 @@ private:
 
         char const* type_string() const;
         char const* command_string() const;
-};
+}; // class Sequence
 
 /* Helper classes to unify UTF-32 and UTF-8 versions of SequenceBuilder.
  * ::put will only be called with C1 controls, so it's ok to simplify
@@ -393,7 +416,7 @@ public:
         {
                 s.push_back(c);
         }
-};
+}; // class DirectEncoder
 
 class UTF8Encoder {
 public:
@@ -403,7 +426,7 @@ public:
                 s.push_back(0xc2);
                 s.push_back(c);
         }
-};
+}; // class UTF8Encoder
 
 template<class S, class E = DirectEncoder<typename S::value_type>>
 class SequenceBuilder {
@@ -660,7 +683,6 @@ private:
                                 break;
                         case ST::DEFAULT:
                                 if (c1) {
-                                        // s.push_back(0xc2); // fixmechpe
                                         m_encoder.put(s, 0x9c); // ST
                                 } else {
                                         s.push_back(0x1b); // ESC
@@ -724,7 +746,7 @@ public:
                                 g_assert_cmpint(vte_seq_arg_value(m_seq.args[n]), ==, seq.param(n));
                 }
         }
-};
+}; // class SequenceBuilder
 
 using u8SequenceBuilder = SequenceBuilder<std::string, UTF8Encoder>;
 using u32SequenceBuilder = SequenceBuilder<std::u32string>;

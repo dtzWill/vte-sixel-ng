@@ -24,7 +24,6 @@
 #include "vtetypes.hh"
 #include "vtedraw.hh"
 #include "ring.hh"
-#include "vteconv.h"
 #include "buffer.h"
 #include "parser.hh"
 #include "parser-glue.hh"
@@ -35,6 +34,11 @@
 #include "vtepcre2.h"
 #include "vteregexinternal.hh"
 
+#include "chunk.hh"
+#include "utf8.hh"
+
+#include <list>
+#include <queue>
 #include <string>
 #include <vector>
 
@@ -169,14 +173,6 @@ typedef enum _VteCursorStyle {
         VTE_CURSOR_STYLE_BLINK_IBEAM      = 5,
         VTE_CURSOR_STYLE_STEADY_IBEAM     = 6
 } VteCursorStyle;
-
-typedef struct _vte_incoming_chunk _vte_incoming_chunk_t;
-struct _vte_incoming_chunk{
-        _vte_incoming_chunk_t *next;
-        guint len;
-        guchar dataminusone;    /* Hack: Keep it right before data, so that data[-1] is valid and usable */
-        guchar data[VTE_INPUT_CHUNK_SIZE - 2 * sizeof(void *) - 1];
-};
 
 struct VteScreen {
 public:
@@ -332,15 +328,14 @@ namespace terminal {
 
 class Terminal {
 public:
-        Terminal(VteTerminal *t);
+        Terminal(vte::platform::Widget* w,
+                 VteTerminal *t);
         ~Terminal();
 
 public:
+        vte::platform::Widget* m_real_widget;
         VteTerminal *m_terminal;
         GtkWidget *m_widget;
-
-        /* Event window */
-        GdkWindow *m_event_window;
 
         /* Metric and sizing data: dimensions of the window */
         vte::grid::row_t m_row_count{VTE_ROWS};
@@ -361,13 +356,18 @@ public:
         gboolean m_pty_input_active;
         GPid m_pty_pid;	                /* pid of child process */
         guint m_child_watch_source;
+        //  pid_t m_pty_pid{-1};           /* pid of child process */
+        // VteReaper *m_reaper;
 
-	/* Input data queues. */
+	/* Queue of chunks of data read from the PTY.
+         * Chunks are inserted at the back, and processed from the front.
+         */
+        std::queue<vte::base::Chunk::unique_type, std::list<vte::base::Chunk::unique_type>> m_incoming_queue;
+
+        vte::base::UTF8Decoder m_utf8_decoder;
+        bool m_using_utf8{true};
         const char *m_encoding;            /* the pty's encoding */
         int m_utf8_ambiguous_width;
-        struct _vte_iso2022_state *m_iso2022;
-        _vte_incoming_chunk_t *m_incoming; /* pending bytestream */
-        GArray *m_pending;                 /* pending characters */
         gunichar m_last_graphic_character; /* for REP */
         /* Array of dirty rectangles in view coordinates; need to
          * add allocation origin and padding when passing to gtk.
@@ -379,15 +379,21 @@ public:
          */
         GList *m_active_terminals_link;
         // FIXMEchpe should these two be g[s]size ?
-        glong m_input_bytes;
+        size_t m_input_bytes;
         glong m_max_input_bytes;
 
 	/* Output data queue. */
         VteByteArray *m_outgoing; /* pending input characters */
-        VteConv m_outgoing_conv;
 
-	/* IConv buffer. */
+#ifdef WITH_ICONV
+        /* Legacy charset support */
+        GIConv m_incoming_conv{GIConv(-1)};
+        VteByteArray* m_incoming_leftover;
+        GIConv m_outgoing_conv{GIConv(-1)};
         VteByteArray *m_conv_buffer;
+
+        void convert_incoming() noexcept;
+#endif
 
 	/* Screen data.  We support the normal screen, and an alternate
 	 * screen, which seems to be a DEC-specific feature. */
@@ -554,14 +560,8 @@ public:
         gboolean m_mouse_autohide;           /* the API setting */
         gboolean m_mouse_cursor_autohidden;  /* whether the autohiding logic wants to hide it; even if autohiding is disabled via API */
 
-        vte::glib::RefPtr<GdkCursor> m_mouse_default_cursor;
-        vte::glib::RefPtr<GdkCursor> m_mouse_mousing_cursor;
-        vte::glib::RefPtr<GdkCursor> m_mouse_hyperlink_cursor;
-        vte::glib::RefPtr<GdkCursor> m_mouse_inviso_cursor;
-
 	/* Input method support. */
-        GtkIMContext *m_im_context;
-        gboolean m_im_preedit_active;
+        bool m_im_preedit_active;
         std::string m_im_preedit;
         PangoAttrList *m_im_preedit_attrs;
         int m_im_preedit_cursor;
@@ -714,7 +714,7 @@ public:
                                            m_allocated_rect.height - m_padding.top - m_padding.bottom);
         }
 
-        inline bool widget_realized() const { return gtk_widget_get_realized(m_widget); }
+        bool widget_realized() const noexcept;
         inline cairo_rectangle_int_t const& get_allocated_rect() const { return m_allocated_rect; }
         inline vte::view::coord_t get_allocated_width() const { return m_allocated_rect.width; }
         inline vte::view::coord_t get_allocated_height() const { return m_allocated_rect.height; }
@@ -737,7 +737,6 @@ public:
         void confine_coordinates(long *xp,
                                  long *yp);
 
-
         void widget_paste(GdkAtom board);
         void widget_copy(VteSelection sel,
                          VteFormat format);
@@ -750,13 +749,9 @@ public:
         void widget_set_hadjustment(GtkAdjustment *adjustment);
         void widget_set_vadjustment(GtkAdjustment *adjustment);
 
-        GdkCursor *widget_cursor_new(GdkCursorType cursor_type) const;
-
         void widget_constructed();
         void widget_realize();
         void widget_unrealize();
-        void widget_map();
-        void widget_unmap();
         void widget_style_updated();
         void widget_focus_in(GdkEventFocus *event);
         void widget_focus_out(GdkEventFocus *event);
@@ -769,14 +764,15 @@ public:
         void widget_scroll(GdkEventScroll *event);
         bool widget_motion_notify(GdkEventMotion *event);
         void widget_draw(cairo_t *cr);
-        void widget_screen_changed (GdkScreen *previous_screen);
         void widget_get_preferred_width(int *minimum_width,
                                         int *natural_width);
         void widget_get_preferred_height(int *minimum_height,
                                          int *natural_height);
         void widget_size_allocate(GtkAllocation *allocation);
 
-        void widget_settings_notify();
+        void set_blink_settings(bool blink,
+                                int blink_time,
+                                int blink_timeout) noexcept;
 
         void expand_rectangle(cairo_rectangle_int_t& rect) const;
         void paint_area(GdkRectangle const* area);
@@ -842,21 +838,23 @@ public:
         bool pty_io_write(GIOChannel *channel,
                           GIOCondition condition);
 
-        void feed_chunks(struct _vte_incoming_chunk *chunks);
         void send_child(char const* data,
                         gssize length,
                         bool local_echo) noexcept;
         void feed_child_using_modes(char const* data,
                                     gssize length);
 
-        void watch_child (GPid child_pid);
-        void child_watch_done(GPid pid,
+        void watch_child (pid_t child_pid);
+        bool terminate_child () noexcept;
+        void child_watch_done(pid_t pid,
                               int status);
 
         void im_commit(char const* text);
-        void im_preedit_start();
-        void im_preedit_end();
-        void im_preedit_changed();
+        void im_preedit_set_active(bool active) noexcept;
+        void im_preedit_reset() noexcept;
+        void im_preedit_changed(char const* str,
+                                int cursorpos,
+                                PangoAttrList* attrs) noexcept;
         bool im_retrieve_surrounding();
         bool im_delete_surrounding(int offset,
                                    int n_chars);
@@ -915,15 +913,12 @@ public:
                           vte::grid::column_t end_col,
                           bool block,
                           bool wrap,
-                          bool include_trailing_spaces,
                           GArray* attributes = nullptr);
 
         GString* get_text_displayed(bool wrap,
-                                    bool include_trailing_spaces,
                                     GArray* attributes = nullptr);
 
         GString* get_text_displayed_a11y(bool wrap,
-                                         bool include_trailing_spaces,
                                          GArray* attributes = nullptr);
 
         GString* get_selected_text(GArray* attributes = nullptr);
@@ -1373,4 +1368,6 @@ _vte_double_equal(double a,
 #pragma GCC diagnostic pop
 }
 
-extern bool g_test_mode;
+#define VTE_TEST_FLAG_DECRQCRA (G_GUINT64_CONSTANT(1) << 0)
+
+extern uint64_t g_test_flags;

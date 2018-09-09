@@ -22,6 +22,7 @@
 #include <locale.h>
 #include <unistd.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 
 #include <glib.h>
 #include <glib/gprintf.h>
@@ -40,13 +41,14 @@ class Options {
 public:
         gboolean allow_window_ops{false};
         gboolean audible_bell{false};
+        gboolean backdrop{false};
+        gboolean bold_is_bright{false};
         gboolean console{false};
         gboolean debug{false};
         gboolean icon_title{false};
         gboolean keep{false};
         gboolean no_argb_visual{false};
         gboolean no_bold{false};
-        gboolean no_bold_is_bright{false};
         gboolean no_builtin_dingus{false};
         gboolean no_context_menu{false};
         gboolean no_double_buffer{false};
@@ -327,14 +329,18 @@ public:
                           "Allow window operations (resize, move, raise/lower, (de)iconify)", nullptr },
                         { "audible-bell", 'a', 0, G_OPTION_ARG_NONE, &audible_bell,
                           "Use audible terminal bell", nullptr },
+                        { "backdrop", 0, 0,G_OPTION_ARG_NONE, &backdrop,
+                          "Dim when toplevel unfocused", nullptr },
                         { "background-color", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_bg_color,
-                          "Set default background color", nullptr },
+                          "Set default background color", "COLOR" },
                         { "background-image", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_background_image,
                           "Set background image from file", "FILE" },
                         { "background-extend", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_background_extend,
                           "Set background image extend", "EXTEND" },
                         { "blink", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_text_blink,
                           "Text blink mode (never|focused|unfocused|always)", "MODE" },
+                        { "bold-is-bright", 'B', 0, G_OPTION_ARG_NONE, &bold_is_bright,
+                          "Bold also brightens colors", nullptr },
                         { "cell-height-scale", 0, 0, G_OPTION_ARG_DOUBLE, &cell_height_scale,
                           "Add extra line spacing", "1.0..2.0" },
                         { "cell-width-scale", 0, 0, G_OPTION_ARG_DOUBLE, &cell_width_scale,
@@ -344,9 +350,9 @@ public:
                         { "cursor-blink", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_cursor_blink,
                           "Cursor blink mode (system|on|off)", "MODE" },
                         { "cursor-background-color", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_cursor_bg_color,
-                          "Enable a colored cursor background", nullptr },
+                          "Enable a colored cursor background", "COLOR" },
                         { "cursor-foreground-color", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_cursor_fg_color,
-                          "Enable a colored cursor foreground", nullptr },
+                          "Enable a colored cursor foreground", "COLOR" },
                         { "cursor-shape", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_cursor_shape,
                           "Set cursor shape (block|underline|ibeam)", nullptr },
                         { "dingu", 'D', 0, G_OPTION_ARG_STRING_ARRAY, &dingus,
@@ -362,15 +368,15 @@ public:
                         { "font", 'f', 0, G_OPTION_ARG_STRING, &font_string,
                           "Specify a font to use", nullptr },
                         { "foreground-color", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_fg_color,
-                          "Set default foreground color", nullptr },
+                          "Set default foreground color", "COLOR" },
                         { "gregex", 0, 0, G_OPTION_ARG_NONE, &use_gregex,
                           "Use GRegex instead of PCRE2", nullptr },
                         { "geometry", 'g', 0, G_OPTION_ARG_STRING, &geometry,
                           "Set the size (in characters) and position", "GEOMETRY" },
                         { "highlight-background-color", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_hl_bg_color,
-                          "Enable distinct highlight background color for selection", nullptr },
+                          "Enable distinct highlight background color for selection", "COLOR" },
                         { "highlight-foreground-color", 0, 0, G_OPTION_ARG_CALLBACK, (void*)parse_hl_fg_color,
-                          "Enable distinct highlight foreground color for selection", nullptr },
+                          "Enable distinct highlight foreground color for selection", "COLOR" },
                         { "icon-title", 'i', 0, G_OPTION_ARG_NONE, &icon_title,
                           "Enable the setting of the icon title", nullptr },
                         { "keep", 'k', 0, G_OPTION_ARG_NONE, &keep,
@@ -379,8 +385,6 @@ public:
                           "Don't use an ARGB visual", nullptr },
                         { "no-bold", 0, 0, G_OPTION_ARG_NONE, &no_bold,
                           "Disable bold", nullptr },
-                        { "no-bold-is-bright", 'B', 0, G_OPTION_ARG_NONE, &no_bold_is_bright,
-                          "Bold does not brightens colors", nullptr },
                         { "no-builtin-dingus", 0, 0, G_OPTION_ARG_NONE, &no_builtin_dingus,
                           "Highlight URLs inside the terminal", nullptr },
                         { "no-context-menu", 0, 0, G_OPTION_ARG_NONE, &no_context_menu,
@@ -814,6 +818,8 @@ struct _VteappTerminal {
         VteTerminal parent;
 
         cairo_pattern_t* background_pattern;
+        bool has_backdrop;
+        bool use_backdrop;
 };
 
 struct _VteappTerminalClass {
@@ -823,6 +829,8 @@ struct _VteappTerminalClass {
 static GType vteapp_terminal_get_type(void);
 
 G_DEFINE_TYPE(VteappTerminal, vteapp_terminal, VTE_TYPE_TERMINAL)
+
+#define BACKDROP_ALPHA (0.2)
 
 static void
 vteapp_terminal_realize(GtkWidget* widget)
@@ -866,7 +874,8 @@ vteapp_terminal_draw(GtkWidget* widget,
                 cairo_rectangle(cr, 0.0, 0.0,
                                 gtk_widget_get_allocated_width(widget),
                                 gtk_widget_get_allocated_height(widget));
-                auto bg = options.get_color_bg();
+                GdkRGBA bg;
+                vte_terminal_get_color_background_for_draw(VTE_TERMINAL(terminal), &bg);
                 cairo_set_source_rgba(cr, bg.red, bg.green, bg.blue, 1.0);
                 cairo_paint(cr);
 
@@ -876,11 +885,34 @@ vteapp_terminal_draw(GtkWidget* widget,
                 cairo_paint(cr);
 
                 cairo_pop_group_to_source(cr);
-                cairo_paint_with_alpha(cr, options.get_alpha());
+                cairo_paint_with_alpha(cr, bg.alpha);
 
         }
 
-        return GTK_WIDGET_CLASS(vteapp_terminal_parent_class)->draw(widget, cr);
+        auto rv = GTK_WIDGET_CLASS(vteapp_terminal_parent_class)->draw(widget, cr);
+
+        if (terminal->use_backdrop && terminal->has_backdrop) {
+                cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+                cairo_set_source_rgba(cr, 0, 0, 0, BACKDROP_ALPHA);
+                cairo_rectangle(cr, 0.0, 0.0,
+                                gtk_widget_get_allocated_width(widget),
+                                gtk_widget_get_allocated_height(widget));
+                cairo_paint(cr);
+        }
+
+        return rv;
+}
+
+static void
+vteapp_terminal_style_updated(GtkWidget* widget)
+{
+        GTK_WIDGET_CLASS(vteapp_terminal_parent_class)->style_updated(widget);
+
+        auto context = gtk_widget_get_style_context(widget);
+        auto flags = gtk_style_context_get_state(context);
+
+        VteappTerminal* terminal = VTEAPP_TERMINAL(widget);
+        terminal->has_backdrop = (flags & GTK_STATE_FLAG_BACKDROP) != 0;
 }
 
 static void
@@ -890,12 +922,15 @@ vteapp_terminal_class_init(VteappTerminalClass *klass)
         widget_class->realize = vteapp_terminal_realize;
         widget_class->unrealize = vteapp_terminal_unrealize;
         widget_class->draw = vteapp_terminal_draw;
+        widget_class->style_updated = vteapp_terminal_style_updated;
 }
 
 static void
 vteapp_terminal_init(VteappTerminal *terminal)
 {
         terminal->background_pattern = nullptr;
+        terminal->has_backdrop = false;
+        terminal->use_backdrop = options.backdrop;
 
         if (options.background_pixbuf != nullptr)
                 vte_terminal_set_clear_background(VTE_TERMINAL(terminal), false);
@@ -1496,7 +1531,12 @@ window_child_exited_cb(VteTerminal* term,
                        int status,
                        VteappWindow* window)
 {
-        verbose_printerr("Child exited with status %x\n", status);
+        if (WIFEXITED(status))
+                verbose_printerr("Child exited with status %x\n", WEXITSTATUS(status));
+        else if (WIFSIGNALED(status))
+                verbose_printerr("Child terminated by signal %d\n", WTERMSIG(status));
+        else
+                verbose_printerr("Child terminated\n");
 
         if (options.output_filename != nullptr) {
                 auto file = g_file_new_for_commandline_arg(options.output_filename);
@@ -1833,7 +1873,7 @@ vteapp_window_constructed(GObject *object)
         vte_terminal_set_allow_hyperlink(window->terminal, !options.no_hyperlink);
         vte_terminal_set_audible_bell(window->terminal, options.audible_bell);
         vte_terminal_set_allow_bold(window->terminal, !options.no_bold);
-        vte_terminal_set_bold_is_bright(window->terminal, !options.no_bold_is_bright);
+        vte_terminal_set_bold_is_bright(window->terminal, options.bold_is_bright);
         vte_terminal_set_cell_height_scale(window->terminal, options.cell_height_scale);
         vte_terminal_set_cell_width_scale(window->terminal, options.cell_width_scale);
         vte_terminal_set_cjk_ambiguous_width(window->terminal, options.cjk_ambiguous_width);
@@ -2111,10 +2151,8 @@ main(int argc,
                gdk_window_set_debug_updates(true);
 #ifdef VTE_DEBUG
        if (options.test_mode) {
-               g_setenv("VTE_TEST", "1", true);
+               vte_set_test_flags(VTE_TEST_FLAGS_ALL);
                options.allow_window_ops = true;
-       } else {
-               g_unsetenv("VTE_TEST");
        }
 #endif
 

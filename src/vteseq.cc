@@ -44,7 +44,7 @@
 using namespace std::literals;
 
 void
-vte::parser::Sequence::print() const
+vte::parser::Sequence::print() const noexcept
 {
 #ifdef VTE_DEBUG
         auto c = m_seq != nullptr ? terminator() : 0;
@@ -145,7 +145,7 @@ vte_unichar_strlen(gunichar const* c)
  */
 char*
 vte::parser::Sequence::ucs4_to_utf8(gunichar const* str,
-                                    ssize_t len) const
+                                    ssize_t len) const noexcept
 {
         if (len < 0)
                 len = vte_unichar_strlen(str);
@@ -1408,7 +1408,7 @@ Terminal::set_color_index(vte::parser::Sequence const& seq,
                                     int number,
                                     int index,
                                     int index_fallback,
-                                    int osc)
+                                    int osc) noexcept
 {
         auto const str = *token;
 
@@ -3426,7 +3426,7 @@ Terminal::DECRQCRA(vte::parser::Sequence const& seq)
 #else
 
         /* Not in test mode? Send a dummy reply */
-        if (!g_test_mode) {
+        if ((g_test_flags & VTE_TEST_FLAG_DECRQCRA) == 0) {
                 return reply(seq, VTE_REPLY_DECCKSR, {id}, "0000");
         }
 
@@ -3653,6 +3653,9 @@ Terminal::DECRQSS(vte::parser::Sequence const& seq)
         /* If at the end, the parser returns a VTE_SEQ_CSI sequence,
          * we interpret that; otherwise we ignore the request and
          * send only a dummy reply.
+         * Note that this makes sure there is only one setting
+         * requested; if there were more than one, the parser would
+         * parse them as GRAPHIC and thus we reply 'invalid'.
          */
         auto const str = seq.string();
         size_t i;

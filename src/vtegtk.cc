@@ -52,6 +52,7 @@
 #include "vtedefines.hh"
 #include "vteinternal.hh"
 #include "vteaccess.h"
+#include "widget.hh"
 
 #include "vtegtk.hh"
 #include "vteregexinternal.hh"
@@ -72,7 +73,10 @@ typedef vte::terminal::Terminal VteTerminalPrivate;
 
 #ifdef VTE_DEBUG
 G_DEFINE_TYPE_WITH_CODE(VteTerminal, vte_terminal, GTK_TYPE_WIDGET,
-                        G_ADD_PRIVATE(VteTerminal)
+                        {
+                                VteTerminal_private_offset =
+                                        g_type_add_instance_private(g_define_type_id, sizeof(vte::platform::Widget));
+                        }
                         g_type_add_class_private (g_define_type_id, sizeof (VteTerminalClassPrivate));
                         G_IMPLEMENT_INTERFACE(GTK_TYPE_SCROLLABLE, NULL)
                         if (_vte_debug_on(VTE_DEBUG_LIFECYCLE)) {
@@ -80,17 +84,34 @@ G_DEFINE_TYPE_WITH_CODE(VteTerminal, vte_terminal, GTK_TYPE_WIDGET,
                         })
 #else
 G_DEFINE_TYPE_WITH_CODE(VteTerminal, vte_terminal, GTK_TYPE_WIDGET,
-                        G_ADD_PRIVATE(VteTerminal)
+                        {
+                                VteTerminal_private_offset =
+                                        g_type_add_instance_private(g_define_type_id, sizeof(vte::platform::Widget));
+                        }
                         g_type_add_class_private (g_define_type_id, sizeof (VteTerminalClassPrivate));
                         G_IMPLEMENT_INTERFACE(GTK_TYPE_SCROLLABLE, NULL))
 #endif
 
-#define IMPL(t) (reinterpret_cast<vte::terminal::Terminal*>(vte_terminal_get_instance_private(t)))
+static inline
+vte::platform::Widget* get_widget(VteTerminal* terminal)
+{
+        return reinterpret_cast<vte::platform::Widget*>(vte_terminal_get_instance_private(terminal));
+}
+
+#define WIDGET(t) (get_widget(t))
+
+vte::terminal::Terminal*
+_vte_terminal_get_impl(VteTerminal *terminal)
+{
+        return WIDGET(terminal)->terminal();
+}
+
+#define IMPL(t) (_vte_terminal_get_impl(t))
 
 guint signals[LAST_SIGNAL];
 GParamSpec *pspecs[LAST_PROP];
 GTimer *process_timer;
-bool g_test_mode = false;
+uint64_t g_test_flags = 0;
 
 static bool
 valid_color(GdkRGBA const* color)
@@ -111,7 +132,7 @@ vte_terminal_set_hadjustment(VteTerminal *terminal,
                              GtkAdjustment *adjustment)
 {
         g_return_if_fail(adjustment == nullptr || GTK_IS_ADJUSTMENT(adjustment));
-        IMPL(terminal)->widget_set_hadjustment(adjustment);
+        WIDGET(terminal)->set_hadjustment(adjustment);
 }
 
 static void
@@ -119,7 +140,7 @@ vte_terminal_set_vadjustment(VteTerminal *terminal,
                              GtkAdjustment *adjustment)
 {
         g_return_if_fail(adjustment == nullptr || GTK_IS_ADJUSTMENT(adjustment));
-        IMPL(terminal)->widget_set_vadjustment(adjustment);
+        WIDGET(terminal)->set_vadjustment(adjustment);
 }
 
 static void
@@ -142,13 +163,13 @@ vte_terminal_set_vscroll_policy(VteTerminal *terminal,
 static void
 vte_terminal_real_copy_clipboard(VteTerminal *terminal)
 {
-	IMPL(terminal)->widget_copy(VTE_SELECTION_CLIPBOARD, VTE_FORMAT_TEXT);
+	WIDGET(terminal)->copy(VTE_SELECTION_CLIPBOARD, VTE_FORMAT_TEXT);
 }
 
 static void
 vte_terminal_real_paste_clipboard(VteTerminal *terminal)
 {
-	IMPL(terminal)->widget_paste(GDK_SELECTION_CLIPBOARD);
+	WIDGET(terminal)->paste(GDK_SELECTION_CLIPBOARD);
 }
 
 static void
@@ -158,7 +179,7 @@ vte_terminal_style_updated (GtkWidget *widget)
 
         GTK_WIDGET_CLASS (vte_terminal_parent_class)->style_updated (widget);
 
-        IMPL(terminal)->widget_style_updated();
+        WIDGET(terminal)->style_updated();
 }
 
 static gboolean
@@ -182,42 +203,42 @@ vte_terminal_key_press(GtkWidget *widget, GdkEventKey *event)
 		}
 	}
 
-        return IMPL(terminal)->widget_key_press(event);
+        return WIDGET(terminal)->key_press(event);
 }
 
 static gboolean
 vte_terminal_key_release(GtkWidget *widget, GdkEventKey *event)
 {
 	VteTerminal *terminal = VTE_TERMINAL(widget);
-        return IMPL(terminal)->widget_key_release(event);
+        return WIDGET(terminal)->key_release(event);
 }
 
 static gboolean
 vte_terminal_motion_notify(GtkWidget *widget, GdkEventMotion *event)
 {
         VteTerminal *terminal = VTE_TERMINAL(widget);
-        return IMPL(terminal)->widget_motion_notify(event);
+        return WIDGET(terminal)->motion_notify(event);
 }
 
 static gboolean
 vte_terminal_button_press(GtkWidget *widget, GdkEventButton *event)
 {
 	VteTerminal *terminal = VTE_TERMINAL(widget);
-        return IMPL(terminal)->widget_button_press(event);
+        return WIDGET(terminal)->button_press(event);
 }
 
 static gboolean
 vte_terminal_button_release(GtkWidget *widget, GdkEventButton *event)
 {
 	VteTerminal *terminal = VTE_TERMINAL(widget);
-        return IMPL(terminal)->widget_button_release(event);
+        return WIDGET(terminal)->button_release(event);
 }
 
 static gboolean
 vte_terminal_scroll(GtkWidget *widget, GdkEventScroll *event)
 {
 	VteTerminal *terminal = VTE_TERMINAL(widget);
-        IMPL(terminal)->widget_scroll(event);
+        WIDGET(terminal)->scroll(event);
         return TRUE;
 }
 
@@ -225,7 +246,7 @@ static gboolean
 vte_terminal_focus_in(GtkWidget *widget, GdkEventFocus *event)
 {
 	VteTerminal *terminal = VTE_TERMINAL(widget);
-        IMPL(terminal)->widget_focus_in(event);
+        WIDGET(terminal)->focus_in(event);
         return FALSE;
 }
 
@@ -233,7 +254,7 @@ static gboolean
 vte_terminal_focus_out(GtkWidget *widget, GdkEventFocus *event)
 {
 	VteTerminal *terminal = VTE_TERMINAL(widget);
-        IMPL(terminal)->widget_focus_out(event);
+        WIDGET(terminal)->focus_out(event);
         return FALSE;
 }
 
@@ -247,7 +268,7 @@ vte_terminal_enter(GtkWidget *widget, GdkEventCrossing *event)
 		ret = GTK_WIDGET_CLASS (vte_terminal_parent_class)->enter_notify_event (widget, event);
 	}
 
-        IMPL(terminal)->widget_enter(event);
+        WIDGET(terminal)->enter(event);
 
         return ret;
 }
@@ -262,7 +283,7 @@ vte_terminal_leave(GtkWidget *widget, GdkEventCrossing *event)
 		ret = GTK_WIDGET_CLASS (vte_terminal_parent_class)->leave_notify_event (widget, event);
 	}
 
-        IMPL(terminal)->widget_leave(event);
+        WIDGET(terminal)->leave(event);
 
         return ret;
 }
@@ -273,7 +294,7 @@ vte_terminal_get_preferred_width(GtkWidget *widget,
 				 int       *natural_width)
 {
 	VteTerminal *terminal = VTE_TERMINAL(widget);
-        IMPL(terminal)->widget_get_preferred_width(minimum_width, natural_width);
+        WIDGET(terminal)->get_preferred_width(minimum_width, natural_width);
 }
 
 static void
@@ -282,14 +303,14 @@ vte_terminal_get_preferred_height(GtkWidget *widget,
 				  int       *natural_height)
 {
 	VteTerminal *terminal = VTE_TERMINAL(widget);
-        IMPL(terminal)->widget_get_preferred_height(minimum_height, natural_height);
+        WIDGET(terminal)->get_preferred_height(minimum_height, natural_height);
 }
 
 static void
 vte_terminal_size_allocate(GtkWidget *widget, GtkAllocation *allocation)
 {
 	VteTerminal *terminal = VTE_TERMINAL(widget);
-        IMPL(terminal)->widget_size_allocate(allocation);
+        WIDGET(terminal)->size_allocate(allocation);
 }
 
 static gboolean
@@ -297,24 +318,28 @@ vte_terminal_draw(GtkWidget *widget,
                   cairo_t *cr)
 {
         VteTerminal *terminal = VTE_TERMINAL (widget);
-        IMPL(terminal)->widget_draw(cr);
+        WIDGET(terminal)->draw(cr);
         return FALSE;
 }
 
 static void
 vte_terminal_realize(GtkWidget *widget)
 {
+	_vte_debug_print(VTE_DEBUG_LIFECYCLE, "vte_terminal_realize()\n");
+
         GTK_WIDGET_CLASS(vte_terminal_parent_class)->realize(widget);
 
         VteTerminal *terminal= VTE_TERMINAL(widget);
-        IMPL(terminal)->widget_realize();
+        WIDGET(terminal)->realize();
 }
 
 static void
 vte_terminal_unrealize(GtkWidget *widget)
 {
+	_vte_debug_print(VTE_DEBUG_LIFECYCLE, "vte_terminal_unrealize()\n");
+
         VteTerminal *terminal = VTE_TERMINAL (widget);
-        IMPL(terminal)->widget_unrealize();
+        WIDGET(terminal)->unrealize();
 
         GTK_WIDGET_CLASS(vte_terminal_parent_class)->unrealize(widget);
 }
@@ -327,7 +352,7 @@ vte_terminal_map(GtkWidget *widget)
         VteTerminal *terminal = VTE_TERMINAL(widget);
         GTK_WIDGET_CLASS(vte_terminal_parent_class)->map(widget);
 
-        IMPL(terminal)->widget_map();
+        WIDGET(terminal)->map();
 }
 
 static void
@@ -336,7 +361,7 @@ vte_terminal_unmap(GtkWidget *widget)
         _vte_debug_print(VTE_DEBUG_LIFECYCLE, "vte_terminal_unmap()\n");
 
         VteTerminal *terminal = VTE_TERMINAL(widget);
-        IMPL(terminal)->widget_unmap();
+        WIDGET(terminal)->unmap();
 
         GTK_WIDGET_CLASS(vte_terminal_parent_class)->unmap(widget);
 }
@@ -351,7 +376,7 @@ vte_terminal_screen_changed (GtkWidget *widget,
                 GTK_WIDGET_CLASS (vte_terminal_parent_class)->screen_changed (widget, previous_screen);
         }
 
-        IMPL(terminal)->widget_screen_changed(previous_screen);
+        WIDGET(terminal)->screen_changed(previous_screen);
 }
 
 static void
@@ -361,7 +386,7 @@ vte_terminal_constructed (GObject *object)
 
         G_OBJECT_CLASS (vte_terminal_parent_class)->constructed (object);
 
-        IMPL(terminal)->widget_constructed();
+        WIDGET(terminal)->constructed();
 }
 
 static void
@@ -379,17 +404,30 @@ vte_terminal_init(VteTerminal *terminal)
 
 	/* Initialize private data. NOTE: place is zeroed */
 	place = vte_terminal_get_instance_private(terminal);
-        new (place) vte::terminal::Terminal(terminal);
+        new (place) vte::platform::Widget(terminal);
 
         gtk_widget_set_has_window(&terminal->widget, FALSE);
 }
 
 static void
+vte_terminal_dispose(GObject *object)
+{
+	_vte_debug_print(VTE_DEBUG_LIFECYCLE, "vte_terminal_dispose()\n");
+
+	VteTerminal *terminal = VTE_TERMINAL (object);
+        WIDGET(terminal)->dispose();
+
+	/* Call the inherited dispose() method. */
+	G_OBJECT_CLASS(vte_terminal_parent_class)->dispose(object);
+}
+
+static void
 vte_terminal_finalize(GObject *object)
 {
-    	VteTerminal *terminal = VTE_TERMINAL (object);
+	_vte_debug_print(VTE_DEBUG_LIFECYCLE, "vte_terminal_finalize()\n");
 
-        IMPL(terminal)->~Terminal();
+	VteTerminal *terminal = VTE_TERMINAL (object);
+        WIDGET(terminal)->~Widget();
 
 	/* Call the inherited finalize() method. */
 	G_OBJECT_CLASS(vte_terminal_parent_class)->finalize(object);
@@ -402,21 +440,22 @@ vte_terminal_get_property (GObject *object,
                            GParamSpec *pspec)
 {
         VteTerminal *terminal = VTE_TERMINAL (object);
+        auto widget = WIDGET(terminal);
         auto impl = IMPL(terminal);
 
 	switch (prop_id)
                 {
                 case PROP_HADJUSTMENT:
-                        g_value_set_object (value, impl->m_hadjustment);
+                        g_value_set_object (value, widget->get_hadjustment());
                         break;
                 case PROP_VADJUSTMENT:
-                        g_value_set_object (value, impl->m_vadjustment);
+                        g_value_set_object (value, widget->get_vadjustment());
                         break;
                 case PROP_HSCROLL_POLICY:
-                        g_value_set_enum (value, impl->m_hscroll_policy);
+                        g_value_set_enum (value, widget->hscroll_policy());
                         break;
                 case PROP_VSCROLL_POLICY:
-                        g_value_set_enum (value, impl->m_vscroll_policy);
+                        g_value_set_enum (value, widget->vscroll_policy());
                         break;
                 case PROP_ALLOW_BOLD:
                         g_value_set_boolean (value, vte_terminal_get_allow_bold (terminal));
@@ -643,12 +682,6 @@ vte_terminal_class_init(VteTerminalClass *klass)
                                  "  =  vte_terminal_paint\n"
                                  "  ]} end update_timeout\n"
                                  "  >  end process_timeout\n");
-
-                char const* test_env = g_getenv("VTE_TEST");
-                if (test_env != nullptr) {
-                        g_test_mode = g_str_equal(test_env, "1");
-                        g_unsetenv("VTE_TEST");
-                }
 	}
 #endif
 
@@ -664,6 +697,7 @@ vte_terminal_class_init(VteTerminalClass *klass)
 
 	/* Override some of the default handlers. */
         gobject_class->constructed = vte_terminal_constructed;
+        gobject_class->dispose = vte_terminal_dispose;
 	gobject_class->finalize = vte_terminal_finalize;
         gobject_class->get_property = vte_terminal_get_property;
         gobject_class->set_property = vte_terminal_set_property;
@@ -871,9 +905,9 @@ vte_terminal_class_init(VteTerminalClass *klass)
          * VteTerminal::encoding-changed:
          * @vteterminal: the object which received the signal
          *
-         * Emitted whenever the terminal's current encoding has changed, either
-         * as a result of receiving a control sequence which toggled between the
-         * local and UTF-8 encodings, or at the parent application's request.
+         * Emitted whenever the terminal's current encoding has changed.
+         *
+         * Note: support for non-UTF-8 is deprecated.
          */
         signals[SIGNAL_ENCODING_CHANGED] =
                 g_signal_new(I_("encoding-changed"),
@@ -1336,7 +1370,7 @@ vte_terminal_class_init(VteTerminalClass *klass)
          */
         pspecs[PROP_BOLD_IS_BRIGHT] =
                 g_param_spec_boolean ("bold-is-bright", NULL, NULL,
-                                      TRUE,
+                                      FALSE,
                                       (GParamFlags) (G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS | G_PARAM_EXPLICIT_NOTIFY));
 
         /**
@@ -1370,9 +1404,10 @@ vte_terminal_class_init(VteTerminalClass *klass)
         /**
          * VteTerminal:cjk-ambiguous-width:
          *
-         * This setting controls whether ambiguous-width characters are narrow or wide
-         * when using the UTF-8 encoding (vte_terminal_set_encoding()). In all other encodings,
-         * the width of ambiguous-width characters is fixed.
+         * This setting controls whether ambiguous-width characters are narrow or wide.
+         * (Note that when using a non-UTF-8 encoding set via vte_terminal_set_encoding(),
+         * the width of ambiguous-width characters is fixed and determined by the encoding
+         * itself.)
          *
          * This setting only takes effect the next time the terminal is reset, either
          * via escape sequence or with vte_terminal_reset().
@@ -1436,6 +1471,9 @@ vte_terminal_class_init(VteTerminalClass *klass)
          * be encoded with.  For certain terminal types, applications executing in the
          * terminal can change the encoding.  The default is defined by the
          * application's locale settings.
+         *
+         * Deprecated: 0.54: Instead of using this, you should use a tool like
+         *   luit(1) when support for non-UTF-8 is required
          */
         pspecs[PROP_ENCODING] =
                 g_param_spec_string ("encoding", NULL, NULL,
@@ -1747,6 +1785,23 @@ vte_get_user_shell (void)
         return NULL;
 }
 
+/**
+ * vte_set_test_flags: (skip):
+ * @flags: flags
+ *
+ * Sets test flags. This function is only useful for implementing
+ * unit tests for vte itself; it is a no-op in non-debug builds.
+ *
+ * Since: 0.54
+ */
+void
+vte_set_test_flags(guint64 flags)
+{
+#ifdef VTE_DEBUG
+        g_test_flags = flags;
+#endif
+}
+
 /* VteTerminal public API */
 
 /**
@@ -1805,7 +1860,7 @@ vte_terminal_copy_clipboard_format(VteTerminal *terminal,
         g_return_if_fail(VTE_IS_TERMINAL(terminal));
         g_return_if_fail(format == VTE_FORMAT_TEXT || format == VTE_FORMAT_HTML);
 
-        IMPL(terminal)->widget_copy(VTE_SELECTION_CLIPBOARD, format);
+        WIDGET(terminal)->copy(VTE_SELECTION_CLIPBOARD, format);
 }
 
 /**
@@ -1820,7 +1875,7 @@ vte_terminal_copy_primary(VteTerminal *terminal)
 {
 	g_return_if_fail(VTE_IS_TERMINAL(terminal));
 	_vte_debug_print(VTE_DEBUG_SELECTION, "Copying to PRIMARY.\n");
-	IMPL(terminal)->widget_copy(VTE_SELECTION_PRIMARY, VTE_FORMAT_TEXT);
+	WIDGET(terminal)->copy(VTE_SELECTION_PRIMARY, VTE_FORMAT_TEXT);
 }
 
 /**
@@ -1828,8 +1883,7 @@ vte_terminal_copy_primary(VteTerminal *terminal)
  * @terminal: a #VteTerminal
  *
  * Sends the contents of the #GDK_SELECTION_CLIPBOARD selection to the
- * terminal's child.  If necessary, the data is converted from UTF-8 to the
- * terminal's current encoding. It's called on paste menu item, or when
+ * terminal's child. It's called on paste menu item, or when
  * user presses Shift+Insert.
  */
 void
@@ -1845,8 +1899,7 @@ vte_terminal_paste_clipboard(VteTerminal *terminal)
  * @terminal: a #VteTerminal
  *
  * Sends the contents of the #GDK_SELECTION_PRIMARY selection to the terminal's
- * child.  If necessary, the data is converted from UTF-8 to the terminal's
- * current encoding.  The terminal will call also paste the
+ * child. The terminal will call also paste the
  * #GDK_SELECTION_PRIMARY selection when the user clicks with the the second
  * mouse button.
  */
@@ -1855,7 +1908,7 @@ vte_terminal_paste_primary(VteTerminal *terminal)
 {
 	g_return_if_fail(VTE_IS_TERMINAL(terminal));
 	_vte_debug_print(VTE_DEBUG_SELECTION, "Pasting PRIMARY.\n");
-	IMPL(terminal)->widget_paste(GDK_SELECTION_PRIMARY);
+	WIDGET(terminal)->paste(GDK_SELECTION_PRIMARY);
 }
 
 /**
@@ -2741,8 +2794,6 @@ vte_terminal_spawn_async(VteTerminal *terminal,
                 return;
         }
 
-        vte_terminal_set_pty(terminal, pty);
-
         guint spawn_flags = (guint)spawn_flags_;
 
         /* We do NOT support this flag. If you want to have some FD open in the child
@@ -2901,7 +2952,6 @@ vte_terminal_get_text(VteTerminal *terminal,
 	g_return_val_if_fail(VTE_IS_TERMINAL(terminal), NULL);
         warn_if_callback(is_selected);
         auto text = IMPL(terminal)->get_text_displayed(true /* wrap */,
-                                                       false /* include trailing whitespace */,
                                                        attributes);
         if (text == nullptr)
                 return nullptr;
@@ -2919,11 +2969,11 @@ vte_terminal_get_text(VteTerminal *terminal,
  * %NULL, characters will only be read if @is_selected returns %TRUE after being
  * passed the column and row, respectively.  A #VteCharAttributes structure
  * is added to @attributes for each byte added to the returned string detailing
- * the character's position, colors, and other characteristics. This function
- * differs from vte_terminal_get_text() in that trailing spaces at the end of
- * lines are included.
+ * the character's position, colors, and other characteristics.
  *
  * Returns: (transfer full): a newly allocated text string, or %NULL.
+ *
+ * Deprecated: 0.56: Use vte_terminal_get_text() instead.
  */
 char *
 vte_terminal_get_text_include_trailing_spaces(VteTerminal *terminal,
@@ -2931,14 +2981,7 @@ vte_terminal_get_text_include_trailing_spaces(VteTerminal *terminal,
 					      gpointer user_data,
 					      GArray *attributes)
 {
-	g_return_val_if_fail(VTE_IS_TERMINAL(terminal), NULL);
-        warn_if_callback(is_selected);
-        auto text = IMPL(terminal)->get_text_displayed(true /* wrap */,
-                                                       true /* include trailing whitespace */,
-                                                       attributes);
-        if (text == nullptr)
-                return nullptr;
-        return (char*)g_string_free(text, FALSE);
+        return vte_terminal_get_text(terminal, is_selected, user_data, attributes);
 }
 
 /**
@@ -2978,7 +3021,6 @@ vte_terminal_get_text_range(VteTerminal *terminal,
                                              end_row, end_col,
                                              false /* block */,
                                              true /* wrap */,
-                                             true /* include trailing whitespace */,
                                              attributes);
         if (text == nullptr)
                 return nullptr;
@@ -3263,8 +3305,10 @@ vte_terminal_get_char_width(VteTerminal *terminal)
  * vte_terminal_get_cjk_ambiguous_width:
  * @terminal: a #VteTerminal
  *
- * Returns whether ambiguous-width characters are narrow or wide when using
- * the UTF-8 encoding (vte_terminal_set_encoding()).
+ *  Returns whether ambiguous-width characters are narrow or wide.
+ * (Note that when using a non-UTF-8 encoding set via vte_terminal_set_encoding(),
+ * the width of ambiguous-width characters is fixed and determined by the encoding
+ * itself.)
  *
  * Returns: 1 if ambiguous-width characters are narrow, or 2 if they are wide
  */
@@ -3280,9 +3324,10 @@ vte_terminal_get_cjk_ambiguous_width(VteTerminal *terminal)
  * @terminal: a #VteTerminal
  * @width: either 1 (narrow) or 2 (wide)
  *
- * This setting controls whether ambiguous-width characters are narrow or wide
- * when using the UTF-8 encoding (vte_terminal_set_encoding()). In all other encodings,
- * the width of ambiguous-width characters is fixed.
+ * This setting controls whether ambiguous-width characters are narrow or wide.
+ * (Note that when using a non-UTF-8 encoding set via vte_terminal_set_encoding(),
+ * the width of ambiguous-width characters is fixed and determined by the encoding
+ * itself.)
  */
 void
 vte_terminal_set_cjk_ambiguous_width(VteTerminal *terminal, int width)
@@ -3540,7 +3585,7 @@ vte_terminal_get_column_count(VteTerminal *terminal)
  * vte_terminal_get_current_directory_uri:
  * @terminal: a #VteTerminal
  *
- * Returns: (transfer none): the URI of the current directory of the
+ * Returns: (nullable) (transfer none): the URI of the current directory of the
  *   process running in the terminal, or %NULL
  */
 const char *
@@ -3555,7 +3600,7 @@ vte_terminal_get_current_directory_uri(VteTerminal *terminal)
  * vte_terminal_get_current_file_uri:
  * @terminal: a #VteTerminal
  *
- * Returns: (transfer none): the URI of the current file the
+ * Returns: (nullable) (transfer none): the URI of the current file the
  *   process running in the terminal is operating on, or %NULL if
  *   not set
  */
@@ -3660,15 +3705,17 @@ vte_terminal_set_delete_binding(VteTerminal *terminal,
  * @terminal: a #VteTerminal
  *
  * Determines the name of the encoding in which the terminal expects data to be
- * encoded.
+ * encoded, or %NULL if UTF-8 is in use.
  *
- * Returns: (transfer none): the current encoding for the terminal
+ * Returns: (nullable) (transfer none): the current encoding for the terminal
+ *
+ * Deprecated: 0.54: Support for non-UTF-8 is deprecated.
  */
 const char *
 vte_terminal_get_encoding(VteTerminal *terminal)
 {
 	g_return_val_if_fail(VTE_IS_TERMINAL(terminal), NULL);
-	return IMPL(terminal)->m_encoding;
+	return WIDGET(terminal)->encoding();
 }
 
 /**
@@ -3681,8 +3728,14 @@ vte_terminal_get_encoding(VteTerminal *terminal)
  * be encoded with.  For certain terminal types, applications executing in the
  * terminal can change the encoding. If @codeset is %NULL, it uses "UTF-8".
  *
+ * Note: Support for non-UTF-8 is deprecated and may get removed altogether.
+ * Instead of this function, you should use a wrapper like luit(1) when
+ * spawning the child process.
+ *
  * Returns: %TRUE if the encoding could be changed to the specified one,
  *  or %FALSE with @error set to %G_CONVERT_ERROR_NO_CONVERSION.
+ *
+ * Deprecated: 0.54: Support for non-UTF-8 is deprecated.
  */
 gboolean
 vte_terminal_set_encoding(VteTerminal *terminal,
@@ -3973,14 +4026,13 @@ vte_terminal_get_has_selection(VteTerminal *terminal)
  * vte_terminal_get_icon_title:
  * @terminal: a #VteTerminal
  *
- * Returns: (transfer none): %NULL
+ * Returns: (nullable) (transfer none): %NULL
  *
  * Deprecated: 0.54:
  */
 const char *
 vte_terminal_get_icon_title(VteTerminal *terminal)
 {
-	g_return_val_if_fail(VTE_IS_TERMINAL(terminal), "");
 	return nullptr;
 }
 
@@ -4261,12 +4313,12 @@ vte_terminal_get_scroll_on_output(VteTerminal *terminal)
  * vte_terminal_get_window_title:
  * @terminal: a #VteTerminal
  *
- * Returns: (transfer none): the window title
+ * Returns: (nullable) (transfer none): the window title, or %NULL
  */
 const char *
 vte_terminal_get_window_title(VteTerminal *terminal)
 {
-	g_return_val_if_fail(VTE_IS_TERMINAL(terminal), "");
+	g_return_val_if_fail(VTE_IS_TERMINAL(terminal), nullptr);
 	return IMPL(terminal)->m_window_title.data();
 }
 
@@ -4280,7 +4332,7 @@ vte_terminal_get_window_title(VteTerminal *terminal)
  *
  * If %NULL, a built-in set is used.
  *
- * Returns: (transfer none): a string, or %NULL
+ * Returns: (nullable) (transfer none): a string, or %NULL
  *
  * Since: 0.40
  */
@@ -4375,4 +4427,37 @@ vte_terminal_set_clear_background(VteTerminal* terminal,
         g_return_if_fail(VTE_IS_TERMINAL(terminal));
 
         IMPL(terminal)->set_clear_background(setting != FALSE);
+}
+
+/**
+ * vte_terminal_get_color_background_for_draw:
+ * @terminal: a #VteTerminal
+ * @color: (out): a location to store a #GdbRGBA color
+ *
+ * Returns the background colour, as used by @terminal when
+ * drawing the background, which may be different from
+ * the color set by vte_terminal_set_color_background().
+ *
+ * Note: you must only call this function while handling the
+ * GtkWidget::draw signal.
+ *
+ * This function is rarely useful. One use for it is if you disable
+ * drawing the background (see vte_terminal_set_clear_background())
+ * and then need to draw the background yourself.
+ *
+ * Since: 0.54
+ */
+void
+vte_terminal_get_color_background_for_draw(VteTerminal* terminal,
+                                           GdkRGBA* color)
+{
+        g_return_if_fail(VTE_IS_TERMINAL(terminal));
+        g_return_if_fail(color != nullptr);
+
+        auto impl = IMPL(terminal);
+        auto const c = impl->get_color(VTE_DEFAULT_BG);
+        color->red = c->red / 65535.;
+        color->green = c->green / 65535.;
+        color->blue = c->blue / 65535.;
+        color->alpha = impl->m_background_alpha;
 }

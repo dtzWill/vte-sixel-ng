@@ -66,7 +66,6 @@ vte_terminal_set_mouse_autohide
 vte_terminal_get_mouse_autohide
 vte_terminal_reset
 vte_terminal_get_text
-vte_terminal_get_text_include_trailing_spaces
 vte_terminal_get_text_range
 vte_terminal_get_cursor_position
 vte_terminal_hyperlink_check_event
@@ -78,8 +77,6 @@ vte_terminal_match_check_event
 vte_terminal_match_set_cursor_name
 vte_terminal_set_cjk_ambiguous_width
 vte_terminal_get_cjk_ambiguous_width
-vte_terminal_set_encoding
-vte_terminal_get_encoding
 vte_terminal_set_word_char_exceptions
 vte_terminal_get_word_char_exceptions
 vte_terminal_set_input_enabled
@@ -107,6 +104,7 @@ vte_terminal_watch_child
 
 <SUBSECTION>
 vte_terminal_set_clear_background
+vte_terminal_get_color_background_for_draw
 
 <SUBSECTION Standard>
 VTE_TYPE_CURSOR_BLINK_MODE
@@ -150,6 +148,9 @@ vte_terminal_spawn_sync
 vte_terminal_get_geometry_hints
 vte_terminal_set_geometry_hints_for_window
 vte_terminal_get_icon_title
+vte_terminal_set_encoding
+vte_terminal_get_encoding
+vte_terminal_get_text_include_trailing_spaces
 
 <SUBSECTION Private>
 VteCharAttributes

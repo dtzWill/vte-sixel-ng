@@ -15,14 +15,13 @@
   <bug-database
   rdf:resource="http://bugzilla.gnome.org/browse.cgi?product=vte"/>
   <category rdf:resource="http://api.gnome.org/doap-extensions#core" />
-  <programming-language>C</programming-language>
   <programming-language>C++</programming-language>
-  <programming-language>Vala</programming-language>
+  <programming-language>C</programming-language>
 
   <maintainer>
     <foaf:Person>
       <foaf:name>Christian Persch</foaf:name>
-      <foaf:mbox rdf:resource="mailto:chpe@gnome.org" />
+      <foaf:mbox rdf:resource="mailto:chpe@src.gnome.org" />
       <gnome:userid>chpe</gnome:userid>
     </foaf:Person>
   </maintainer>

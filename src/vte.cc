@@ -39,10 +39,10 @@
 #include "vteinternal.hh"
 #include "buffer.h"
 #include "debug.h"
-#include "vteconv.h"
 #include "vtedraw.hh"
 #include "ring.hh"
 #include "caps.hh"
+#include "widget.hh"
 
 #ifdef HAVE_WCHAR_H
 #include <wchar.h>
@@ -58,7 +58,6 @@
 #include <gdk/gdk.h>
 #include <gtk/gtk.h>
 #include <pango/pango.h>
-#include "iso2022.h"
 #include "keymap.h"
 #include "marshal.h"
 #include "vteaccess.h"
@@ -67,12 +66,6 @@
 #include "vtegtk.hh"
 
 #include <new> /* placement new */
-
-/* Some sanity checks */
-/* FIXMEchpe: move this to there when splitting _vte_incoming_chunk into its own file */
-static_assert(sizeof(struct _vte_incoming_chunk) <= VTE_INPUT_CHUNK_SIZE, "_vte_incoming_chunk too large");
-static_assert(offsetof(struct _vte_incoming_chunk, data) == offsetof(struct _vte_incoming_chunk, dataminusone) + 1, "_vte_incoming_chunk layout wrong");
-
 
 #ifndef HAVE_ROUND
 static inline double round(double x) {
@@ -122,96 +115,6 @@ _vte_unichar_width(gunichar c, int utf8_ambiguous_width)
         if (G_UNLIKELY (g_unichar_iswide_cjk (c)))
                 return 2;
         return 1;
-}
-
-/* process incoming data without copying */
-static struct _vte_incoming_chunk *free_chunks;
-static struct _vte_incoming_chunk *
-get_chunk (void)
-{
-	struct _vte_incoming_chunk *chunk = NULL;
-	if (free_chunks) {
-		chunk = free_chunks;
-		free_chunks = free_chunks->next;
-	}
-	if (chunk == NULL) {
-		chunk = g_new (struct _vte_incoming_chunk, 1);
-	}
-	chunk->next = NULL;
-	chunk->len = 0;
-	return chunk;
-}
-static void
-release_chunk (struct _vte_incoming_chunk *chunk)
-{
-	chunk->next = free_chunks;
-	chunk->len = free_chunks ? free_chunks->len + 1 : 0;
-	free_chunks = chunk;
-}
-static void
-prune_chunks (guint len)
-{
-	struct _vte_incoming_chunk *chunk = NULL;
-	if (len && free_chunks != NULL) {
-	    if (free_chunks->len > len) {
-		struct _vte_incoming_chunk *last;
-		chunk = free_chunks;
-		while (free_chunks->len > len) {
-		    last = free_chunks;
-		    free_chunks = free_chunks->next;
-		}
-		last->next = NULL;
-	    }
-	} else {
-	    chunk = free_chunks;
-	    free_chunks = NULL;
-	}
-	while (chunk != NULL) {
-		struct _vte_incoming_chunk *next = chunk->next;
-		g_free (chunk);
-		chunk = next;
-	}
-}
-static void
-_vte_incoming_chunks_release (struct _vte_incoming_chunk *chunk)
-{
-	while (chunk) {
-		struct _vte_incoming_chunk *next = chunk->next;
-		release_chunk (chunk);
-		chunk = next;
-	}
-}
-static gsize
-_vte_incoming_chunks_length (struct _vte_incoming_chunk *chunk)
-{
-	gsize len = 0;
-	while (chunk) {
-		len += chunk->len;
-		chunk = chunk->next;
-	}
-	return len;
-}
-static gsize
-_vte_incoming_chunks_count (struct _vte_incoming_chunk *chunk)
-{
-	gsize cnt = 0;
-	while (chunk) {
-		cnt ++;
-		chunk = chunk->next;
-	}
-	return cnt;
-}
-static struct _vte_incoming_chunk *
-_vte_incoming_chunks_reverse(struct _vte_incoming_chunk *chunk)
-{
-	struct _vte_incoming_chunk *prev = NULL;
-	while (chunk) {
-		struct _vte_incoming_chunk *next = chunk->next;
-		chunk->next = prev;
-		prev = chunk;
-		chunk = next;
-	}
-	return prev;
 }
 
 static void
@@ -971,7 +874,6 @@ Terminal::match_contents_refresh()
 	match_contents_clear();
 	GArray *array = g_array_new(FALSE, TRUE, sizeof(struct _VteCharAttributes));
         auto match_contents = get_text_displayed(true /* wrap */,
-                                                 false /* include trailing whitespace */,
                                                  array);
         m_match_contents = g_string_free(match_contents, FALSE);
 	m_match_attributes = array;
@@ -1043,7 +945,7 @@ Terminal::set_cursor_from_regex_match(struct vte_match_regex *regex)
 			return;
         }
 
-	gdk_window_set_cursor(m_event_window, gdk_cursor);
+        m_real_widget->set_cursor(gdk_cursor);
 
         if (gdk_cursor)
                 g_object_unref(gdk_cursor);
@@ -1087,12 +989,6 @@ Terminal::regex_match_remove(int tag)
                 regex_match_clear (regex);
 	}
 	match_hilite_clear();
-}
-
-GdkCursor *
-Terminal::widget_cursor_new(GdkCursorType cursor_type) const
-{
-	return gdk_cursor_new_for_display(gtk_widget_get_display(m_widget), cursor_type);
 }
 
 int
@@ -1617,11 +1513,17 @@ Terminal::view_coords_from_event(GdkEvent const* event) const
 {
         double x, y;
         if (event == nullptr ||
-            ((reinterpret_cast<GdkEventAny const*>(event))->window != m_event_window) ||
+            ((reinterpret_cast<GdkEventAny const*>(event))->window != m_real_widget->event_window()) ||
             !gdk_event_get_coords(event, &x, &y))
                 return vte::view::coords(-1, -1);
 
         return vte::view::coords(x - m_padding.left, y - m_padding.top);
+}
+
+bool
+Terminal::widget_realized() const noexcept
+{
+        return m_real_widget ? m_real_widget->realized() : false;
 }
 
 /*
@@ -2051,83 +1953,93 @@ Terminal::maybe_scroll_to_bottom()
 bool
 Terminal::set_encoding(char const* codeset)
 {
-	VteConv conv;
-
-        GObject *object = G_OBJECT(m_terminal);
-
-	if (codeset == NULL) {
+#ifdef WITH_ICONV
+	if (codeset == nullptr) {
                 codeset = "UTF-8";
 	}
-	if ((m_encoding != nullptr) && g_str_equal(codeset, m_encoding)) {
-		/* Nothing to do! */
-		return true;
-	}
 
-	/* Open new conversions. */
-	conv = _vte_conv_open(codeset, "UTF-8");
-	if (conv == VTE_INVALID_CONV)
-                return false;
+        bool const using_utf8 = g_str_equal(codeset, "UTF-8");
 
-	auto old_codeset = m_encoding;
+        if (using_utf8) {
+                if (m_incoming_conv != ((GIConv)-1))
+                        g_iconv_close(m_incoming_conv);
+                if (m_outgoing_conv != ((GIConv)-1))
+                        g_iconv_close(m_outgoing_conv);
+        } else {
+                auto outconv = g_iconv_open(codeset, "UTF-8");
+                if (outconv == ((GIConv)-1))
+                        return false;
 
-        g_object_freeze_notify(object);
+                auto inconv = g_iconv_open("UTF-8", codeset);
+                if (inconv == ((GIConv)-1)) {
+                        g_iconv_close(outconv);
+                        return FALSE;
+                }
 
-	if (m_outgoing_conv != VTE_INVALID_CONV) {
-		_vte_conv_close(m_outgoing_conv);
-	}
-	m_outgoing_conv = conv;
+                if (m_outgoing_conv != ((GIConv)-1)) {
+                        g_iconv_close(m_outgoing_conv);
+                }
+                m_outgoing_conv = outconv; /* adopted */
 
-	/* Set the terminal's encoding to the new value. */
-	m_encoding = g_intern_string(codeset);
+                if (m_incoming_conv != ((GIConv)-1)) {
+                        g_iconv_close(m_incoming_conv);
+                }
+                m_incoming_conv = inconv; /* adopted */
 
-	/* Convert any buffered output bytes. */
-	if ((_vte_byte_array_length(m_outgoing) > 0) &&
-	    (old_codeset != nullptr)) {
-                char *obuf1, *obuf2;
-                gsize bytes_written;
+                /* Set the terminal's encoding to the new value. */
+                auto old_codeset = m_encoding ? m_encoding : "UTF-8";
+                m_encoding = g_intern_string(codeset);
 
-		/* Convert back to UTF-8. */
-		obuf1 = g_convert((char *)m_outgoing->data,
-				  _vte_byte_array_length(m_outgoing),
-				  "UTF-8",
-				  old_codeset,
-				  NULL,
-				  &bytes_written,
-				  NULL);
-		if (obuf1 != NULL) {
-			/* Convert to the new encoding. */
-			obuf2 = g_convert(obuf1,
-					  bytes_written,
-					  codeset,
-					  "UTF-8",
-					  NULL,
-					  &bytes_written,
-					  NULL);
-			if (obuf2 != NULL) {
-				_vte_byte_array_clear(m_outgoing);
-				_vte_byte_array_append(m_outgoing,
-						   obuf2, bytes_written);
-				g_free(obuf2);
-			}
-			g_free(obuf1);
-		}
-	}
+                /* Convert any buffered output bytes. */
+                if ((_vte_byte_array_length(m_outgoing) > 0) &&
+                    (old_codeset != nullptr)) {
+                        char *obuf1, *obuf2;
+                        gsize bytes_written;
 
-	/* Set the encoding for incoming text. */
-	_vte_iso2022_state_set_codeset(m_iso2022,
-				       m_encoding);
+                        /* Convert back to UTF-8. */
+                        obuf1 = g_convert((char *)m_outgoing->data,
+                                          _vte_byte_array_length(m_outgoing),
+                                          "UTF-8",
+                                          old_codeset,
+                                          NULL,
+                                          &bytes_written,
+                                          NULL);
+                        if (obuf1 != NULL) {
+                                /* Convert to the new encoding. */
+                                obuf2 = g_convert(obuf1,
+                                                  bytes_written,
+                                                  codeset,
+                                                  "UTF-8",
+                                                  NULL,
+                                                  &bytes_written,
+                                                  NULL);
+                                if (obuf2 != NULL) {
+                                        _vte_byte_array_clear(m_outgoing);
+                                        _vte_byte_array_append(m_outgoing,
+                                                               obuf2, bytes_written);
+                                        g_free(obuf2);
+                                }
+                                g_free(obuf1);
+                        }
+                }
+        }
+
+        m_using_utf8 = using_utf8;
 
 	_vte_debug_print(VTE_DEBUG_IO,
 			"Set terminal encoding to `%s'.\n",
 			m_encoding);
 	_vte_debug_print(VTE_DEBUG_SIGNALS,
 			"Emitting `encoding-changed'.\n");
+
+        GObject *object = G_OBJECT(m_terminal);
 	g_signal_emit(object, signals[SIGNAL_ENCODING_CHANGED], 0);
         g_object_notify_by_pspec(object, pspecs[PROP_ENCODING]);
 
-        g_object_thaw_notify(object);
-
         return true;
+#else
+        return false;
+#endif
 }
 
 bool
@@ -2230,7 +2142,7 @@ Terminal::apply_mouse_cursor()
                 if (m_hyperlink_hover_idx != 0) {
                         _vte_debug_print(VTE_DEBUG_CURSOR,
                                         "Setting hyperlink mouse cursor.\n");
-                        gdk_window_set_cursor(m_event_window, m_mouse_hyperlink_cursor.get());
+                        m_real_widget->set_cursor(vte::platform::Widget::Cursor::eHyperlink);
                 } else if ((guint)m_match_tag < m_match_regexes->len) {
                         struct vte_match_regex *regex =
                                 &g_array_index(m_match_regexes,
@@ -2240,16 +2152,16 @@ Terminal::apply_mouse_cursor()
                 } else if (m_mouse_tracking_mode) {
 			_vte_debug_print(VTE_DEBUG_CURSOR,
 					"Setting mousing cursor.\n");
-			gdk_window_set_cursor(m_event_window, m_mouse_mousing_cursor.get());
+                        m_real_widget->set_cursor(vte::platform::Widget::Cursor::eMousing);
 		} else {
 			_vte_debug_print(VTE_DEBUG_CURSOR,
 					"Setting default mouse cursor.\n");
-			gdk_window_set_cursor(m_event_window, m_mouse_default_cursor.get());
+                        m_real_widget->set_cursor(vte::platform::Widget::Cursor::eDefault);
 		}
 	} else {
 		_vte_debug_print(VTE_DEBUG_CURSOR,
 				"Setting to invisible cursor.\n");
-		gdk_window_set_cursor(m_event_window, m_mouse_inviso_cursor.get());
+                m_real_widget->set_cursor(vte::platform::Widget::Cursor::eInvisible);
 	}
 }
 
@@ -3142,9 +3054,8 @@ Terminal::child_watch_done(GPid pid,
         set_pty(nullptr);
 
         /* Tell observers what's happened. */
-        _vte_debug_print(VTE_DEBUG_SIGNALS,
-                         "Emitting `child-exited'.\n");
-        g_signal_emit(object, signals[SIGNAL_CHILD_EXITED], 0, status);
+        if (m_real_widget)
+                m_real_widget->emit_child_exited(status);
 
         g_object_thaw_notify(object);
 }
@@ -3407,8 +3318,7 @@ Terminal::pty_channel_eof()
 void
 Terminal::im_reset()
 {
-	if (widget_realized() && m_im_context)
-		gtk_im_context_reset(m_im_context);
+        m_real_widget->im_reset();
 
         m_im_preedit.clear();
         m_im_preedit.shrink_to_fit();
@@ -3419,8 +3329,176 @@ Terminal::im_reset()
         }
 }
 
-/* Process incoming data, first converting it to unicode characters, and then
- * processing control sequences. */
+#ifdef WITH_ICONV
+
+static size_t
+_vte_conv(GIConv conv,
+	  char **inbuf, gsize *inbytes_left,
+	  gchar **outbuf, gsize *outbytes_left)
+{
+	size_t ret, tmp;
+	gchar *work_inbuf_start, *work_inbuf_working;
+	gchar *work_outbuf_start, *work_outbuf_working;
+	gsize work_inbytes, work_outbytes;
+
+	g_assert(conv != (GIConv) -1);
+
+	work_inbuf_start = work_inbuf_working = *inbuf;
+	work_outbuf_start = work_outbuf_working = *outbuf;
+	work_inbytes = *inbytes_left;
+	work_outbytes = *outbytes_left;
+
+	/* Call the underlying conversion. */
+	ret = 0;
+	do {
+		tmp = g_iconv(conv,
+					 &work_inbuf_working,
+					 &work_inbytes,
+					 &work_outbuf_working,
+					 &work_outbytes);
+		if (tmp == (size_t) -1) {
+			/* Check for zero bytes, which we pass right through. */
+			if (errno == EILSEQ) {
+				if ((work_inbytes > 0) &&
+				    (work_inbuf_working[0] == '\0') &&
+				    (work_outbytes > 0)) {
+					work_outbuf_working[0] = '\0';
+					work_outbuf_working++;
+					work_inbuf_working++;
+					work_outbytes--;
+					work_inbytes--;
+					ret++;
+				} else {
+					/* No go. */
+					ret = -1;
+					break;
+				}
+			} else {
+				ret = -1;
+				break;
+			}
+		} else {
+			ret += tmp;
+			break;
+		}
+	} while (work_inbytes > 0);
+
+	/* We can't handle this particular failure, and it should
+	 * never happen.  (If it does, our caller needs fixing.)  */
+	g_assert((ret != (size_t)-1) || (errno != E2BIG));
+
+        /* Pass on the output results. */
+        *outbuf = work_outbuf_working;
+        *outbytes_left -= (work_outbuf_working - work_outbuf_start);
+
+        /* Pass on the input results. */
+        *inbuf = work_inbuf_working;
+        *inbytes_left -= (work_inbuf_working - work_inbuf_start);
+
+	return ret;
+}
+
+void
+Terminal::convert_incoming() noexcept
+{
+        /* This is for legacy applications, so efficiency is not
+         * of any concern. Flatten the chunks into one big buffer,
+         * process that, and put the resulting UTF-8 back into
+         * chunks.
+         */
+        auto buf = _vte_byte_array_new();
+        _vte_byte_array_append(buf, m_incoming_leftover->data, m_incoming_leftover->len);
+        _vte_byte_array_clear(m_incoming_leftover);
+        while (!m_incoming_queue.empty()) {
+                auto chunk = m_incoming_queue.front().get();
+                _vte_byte_array_append(buf, chunk->data, chunk->len);
+                m_incoming_queue.pop();
+        }
+
+        /* Convert the data to UTF-8 */
+        auto inbuf = (char*)buf->data;
+        size_t inbytes = buf->len;
+
+        _VTE_DEBUG_IF(VTE_DEBUG_IO) {
+                _vte_debug_hexdump("Incoming buffer before conversion to UTF-8",
+                                   (uint8_t const*)inbuf, inbytes);
+        }
+
+        auto unibuf = _vte_byte_array_new();
+        _vte_byte_array_set_minimum_size(unibuf, VTE_UTF8_BPC * inbytes);
+        auto outbuf = (char*)unibuf->data;
+        size_t outbytes = unibuf->len;
+
+        bool stop = false;
+        do {
+                auto converted = _vte_conv(m_incoming_conv,
+                                           &inbuf, &inbytes,
+                                           &outbuf, &outbytes);
+                switch (converted) {
+                case ((gsize)-1):
+                        switch (errno) {
+                        case EILSEQ: {
+                                /* Munge the input. */
+                                inbuf++;
+                                inbytes--;
+                                auto l = g_unichar_to_utf8(0xfffdU, (char*)outbuf);
+                                outbuf += l;
+                                outbytes -= l;
+                                break;
+                        }
+                        case EINVAL:
+                                /* Incomplete. Save for later. */
+                                stop = true;
+                                break;
+                        case E2BIG:
+                                /* Should never happen. */
+                                g_assert_not_reached();
+                                break;
+                        default:
+                                /* Should never happen. */
+                                g_assert_not_reached();
+                                break;
+                        }
+                default:
+                        break;
+                }
+        } while ((inbytes > 0) && !stop);
+
+        /* FIXMEchpe this code used to skip NUL bytes,
+         * while the _vte_conv call passes NUL bytes through
+         * specifically. What's goint on!?
+         */
+
+        /* Done. */
+        auto processed = buf->len - inbytes;
+        unibuf->len = unibuf->len - outbytes;
+
+        /* If anything is left unconverted, store it for the next processing round. */
+        if (processed != buf->len) {
+                _vte_byte_array_append(m_incoming_leftover,
+                                       buf->data + processed,
+                                       buf->len - processed);
+        }
+
+        auto outlen = unibuf->len;
+        while (outlen > 0) {
+                outbuf = (char*)unibuf->data;
+                while (outlen > 0) {
+                        m_incoming_queue.push(std::move(vte::base::Chunk::get()));
+                        auto chunk = m_incoming_queue.back().get();
+                        auto len = std::min(size_t(outlen), chunk->capacity());
+                        memcpy(chunk->data, outbuf, len);
+                        chunk->len = len;
+                        outbuf += len;
+                        outlen -= len;
+                }
+
+                g_assert_cmpuint(outlen, ==, 0);
+        }
+}
+
+#endif /* WITH_ICONV */
+
 void
 Terminal::process_incoming()
 {
@@ -3428,19 +3506,14 @@ Terminal::process_incoming()
 	gboolean saved_cursor_visible;
         VteCursorStyle saved_cursor_style;
 	GdkPoint bbox_topleft, bbox_bottomright;
-	gunichar *wbuf;
-	gsize wcount;
 	gboolean modified, bottom;
 	gboolean invalidated_text;
 	gboolean in_scroll_region;
-	GArray *unichars;
-	struct _vte_incoming_chunk *chunk, *next_chunk, *achunk = NULL;
 
 	_vte_debug_print(VTE_DEBUG_IO,
-			"Handler processing %" G_GSIZE_FORMAT " bytes over %" G_GSIZE_FORMAT " chunks + %d bytes pending.\n",
-			_vte_incoming_chunks_length(m_incoming),
-			_vte_incoming_chunks_count(m_incoming),
-			m_pending->len);
+                         "Handler processing %" G_GSIZE_FORMAT " bytes over %" G_GSIZE_FORMAT " chunks.\n",
+                         m_input_bytes,
+                         m_incoming_queue.size());
 	_vte_debug_print (VTE_DEBUG_WORK, "(");
 
         auto previous_screen = m_screen;
@@ -3460,75 +3533,15 @@ Terminal::process_incoming()
             && (m_screen->cursor.row <= (m_screen->insert_delta + m_scrolling_region.end));
 
 	/* We should only be called when there's data to process. */
-	g_assert(m_incoming ||
-		 (m_pending->len > 0));
+	g_assert(!m_incoming_queue.empty());
 
-	/* Convert the data into unicode characters. */
-	unichars = m_pending;
-	for (chunk = _vte_incoming_chunks_reverse (m_incoming);
-			chunk != NULL;
-			chunk = next_chunk) {
-		gsize processed;
-		next_chunk = chunk->next;
-		if (chunk->len == 0) {
-			goto skip_chunk;
-		}
-		processed = _vte_iso2022_process(m_iso2022,
-				chunk->data, chunk->len,
-				unichars);
-		if (G_UNLIKELY (processed != chunk->len)) {
-			/* shuffle the data about */
-			g_memmove (chunk->data, chunk->data + processed,
-					chunk->len - processed);
-			chunk->len = chunk->len - processed;
-			processed = sizeof (chunk->data) - chunk->len;
-			if (processed != 0 && next_chunk !=  NULL) {
-				if (next_chunk->len <= processed) {
-					/* consume it entirely */
-					memcpy (chunk->data + chunk->len,
-							next_chunk->data,
-							next_chunk->len);
-					chunk->len += next_chunk->len;
-					chunk->next = next_chunk->next;
-					release_chunk (next_chunk);
-				} else {
-					/* next few bytes */
-					memcpy (chunk->data + chunk->len,
-							next_chunk->data,
-							processed);
-					chunk->len += processed;
-					g_memmove (next_chunk->data,
-							next_chunk->data + processed,
-							next_chunk->len - processed);
-					next_chunk->len -= processed;
-				}
-				next_chunk = chunk; /* repeat */
-			} else {
-				break;
-			}
-		} else {
-skip_chunk:
-			/* cache the last chunk */
-			if (achunk) {
-				release_chunk (achunk);
-			}
-			achunk = chunk;
-		}
-	}
-	if (achunk) {
-		if (chunk != NULL) {
-			release_chunk (achunk);
-		} else {
-			chunk = achunk;
-			chunk->next = NULL;
-			chunk->len = 0;
-		}
-	}
-	m_incoming = chunk;
-
-	/* Compute the number of unicode characters we got. */
-	wbuf = &g_array_index(unichars, gunichar, 0);
-	wcount = unichars->len;
+#ifdef WITH_ICONV
+        /* If we're using a legacy encoding for I/O, we need to
+         * convert the input to UTF-8 now.
+         */
+        if (G_UNLIKELY(!m_using_utf8))
+                convert_incoming();
+#endif
 
 	modified = FALSE;
 	invalidated_text = FALSE;
@@ -3540,158 +3553,194 @@ skip_chunk:
 
         m_line_wrapped = false;
 
-        auto const *wp = wbuf;
-        auto const* wend = wbuf + wcount;
-        for ( ; wp < wend; ++wp) {
+        size_t bytes_processed = 0;
 
-                auto rv = m_parser.feed(*wp);
-                if (G_UNLIKELY(rv < 0)) {
-                        char c_buf[7];
-                        g_snprintf(c_buf, sizeof(c_buf), "%lc", *wp);
-                        char const* wp_str = g_unichar_isprint(*wp) ? c_buf : _vte_debug_sequence_to_string(c_buf, -1);
-                        _vte_debug_print(VTE_DEBUG_PARSER, "Parser error on U+%04X [%s]!\n",
-                                         *wp, wp_str);
-                        break;
+        while (!m_incoming_queue.empty()) {
+                auto chunk = std::move(m_incoming_queue.front());
+                m_incoming_queue.pop();
+
+                g_assert_nonnull(chunk.get());
+
+                _VTE_DEBUG_IF(VTE_DEBUG_IO) {
+                        _vte_debug_hexdump("Incoming buffer", chunk->data, chunk->len);
                 }
 
-                if (rv != VTE_SEQ_NONE)
-                        g_assert((bool)seq);
+                bytes_processed += chunk->len;
 
-                _VTE_DEBUG_IF(VTE_DEBUG_PARSER) {
-                        if (rv != VTE_SEQ_NONE) {
-                                seq.print();
-                        }
-                }
+                auto const* ip = chunk->data;
+                auto const* iend = chunk->data + chunk->len;
 
-                // FIXMEchpe this assumes that the only handler inserting
-                // a character is GRAPHIC, which isn't true (at least ICH, REP, SUB
-                // also do, and invalidate directly for now)...
+                for ( ; ip < iend; ++ip) {
 
-                switch (rv) {
-                case VTE_SEQ_GRAPHIC: {
+                        switch (m_utf8_decoder.decode(*ip)) {
+                        case vte::base::UTF8Decoder::REJECT_REWIND:
+                                /* Rewind the stream.
+                                 * Note that this will never lead to a loop, since in the
+                                 * next round this byte *will* be consumed.
+                                 */
+                                --ip;
+                                /* [[fallthrough]]; */
+                        case vte::base::UTF8Decoder::REJECT:
+                                m_utf8_decoder.reset();
+                                /* Fall through to insert the U+FFFD replacement character. */
+                                /* [[fallthrough]]; */
+                        case vte::base::UTF8Decoder::ACCEPT: {
+                                auto rv = m_parser.feed(m_utf8_decoder.codepoint());
+                                if (G_UNLIKELY(rv < 0)) {
+                                        uint32_t c = m_utf8_decoder.codepoint();
+                                        char c_buf[7];
+                                        g_snprintf(c_buf, sizeof(c_buf), "%lc", c);
+                                        char const* wp_str = g_unichar_isprint(c) ? c_buf : _vte_debug_sequence_to_string(c_buf, -1);
+                                        _vte_debug_print(VTE_DEBUG_PARSER, "Parser error on U+%04X [%s]!\n",
+                                                         c, wp_str);
+                                        break;
+                                }
 
-			bbox_topleft.x = MIN(bbox_topleft.x,
-                                             m_screen->cursor.col);
-			bbox_topleft.y = MIN(bbox_topleft.y,
-                                             m_screen->cursor.row);
+#ifdef VTE_DEBUG
+                                if (rv != VTE_SEQ_NONE)
+                                        g_assert((bool)seq);
+#endif
 
-			// does insert_char(c, false, false)
-                        GRAPHIC(seq);
-                        _vte_debug_print(VTE_DEBUG_PARSER,
-                                         "Last graphic is now U+%04X %lc\n",
-                                         m_last_graphic_character,
-                                         g_unichar_isprint(m_last_graphic_character) ? m_last_graphic_character : 0xfffd);
+                                _VTE_DEBUG_IF(VTE_DEBUG_PARSER) {
+                                        if (rv != VTE_SEQ_NONE) {
+                                                seq.print();
+                                        }
+                                }
 
-                        if (m_line_wrapped) {
-                                m_line_wrapped = false;
-				/* line wrapped, correct bbox */
-				if (invalidated_text &&
-                                                (m_screen->cursor.col > bbox_bottomright.x + VTE_CELL_BBOX_SLACK	||
-                                                 m_screen->cursor.col < bbox_topleft.x - VTE_CELL_BBOX_SLACK	||
-                                                 m_screen->cursor.row > bbox_bottomright.y + VTE_CELL_BBOX_SLACK	||
-                                                 m_screen->cursor.row < bbox_topleft.y - VTE_CELL_BBOX_SLACK)) {
-					/* Clip off any part of the box which isn't already on-screen. */
-					bbox_topleft.x = MAX(bbox_topleft.x, 0);
-                                        bbox_topleft.y = MAX(bbox_topleft.y, top_row);
-					bbox_bottomright.x = MIN(bbox_bottomright.x,
-							m_column_count);
-					/* lazily apply the +1 to the cursor_row */
-					bbox_bottomright.y = MIN(bbox_bottomright.y + 1,
-                                                        bottom_row + 1);
+                                // FIXMEchpe this assumes that the only handler inserting
+                                // a character is GRAPHIC, which isn't true (at least ICH, REP, SUB
+                                // also do, and invalidate directly for now)...
 
-					invalidate_cells(
-							bbox_topleft.x,
-							bbox_bottomright.x - bbox_topleft.x,
-							bbox_topleft.y,
-							bbox_bottomright.y - bbox_topleft.y);
-					bbox_bottomright.x = bbox_bottomright.y = -G_MAXINT;
-					bbox_topleft.x = bbox_topleft.y = G_MAXINT;
+                                switch (rv) {
+                                case VTE_SEQ_GRAPHIC: {
 
-				}
-				bbox_topleft.x = MIN(bbox_topleft.x, 0);
-				bbox_topleft.y = MIN(bbox_topleft.y,
-                                                     m_screen->cursor.row);
-			}
-			/* Add the cells over which we have moved to the region
-			 * which we need to refresh for the user. */
-			bbox_bottomright.x = MAX(bbox_bottomright.x,
-                                                 m_screen->cursor.col);
-                        /* cursor.row + 1 (defer until inv.) */
-			bbox_bottomright.y = MAX(bbox_bottomright.y,
-                                                 m_screen->cursor.row);
-			invalidated_text = TRUE;
+                                        bbox_topleft.x = MIN(bbox_topleft.x,
+                                                             m_screen->cursor.col);
+                                        bbox_topleft.y = MIN(bbox_topleft.y,
+                                                             m_screen->cursor.row);
 
-			/* We *don't* emit flush pending signals here. */
-			modified = TRUE;
+                                        // does insert_char(c, false, false)
+                                        GRAPHIC(seq);
+                                        _vte_debug_print(VTE_DEBUG_PARSER,
+                                                         "Last graphic is now U+%04X %lc\n",
+                                                         m_last_graphic_character,
+                                                         g_unichar_isprint(m_last_graphic_character) ? m_last_graphic_character : 0xfffd);
 
-                        break;
-                }
+                                        if (m_line_wrapped) {
+                                                m_line_wrapped = false;
+                                                /* line wrapped, correct bbox */
+                                                if (invalidated_text &&
+                                                    (m_screen->cursor.col > bbox_bottomright.x + VTE_CELL_BBOX_SLACK	||
+                                                     m_screen->cursor.col < bbox_topleft.x - VTE_CELL_BBOX_SLACK	||
+                                                     m_screen->cursor.row > bbox_bottomright.y + VTE_CELL_BBOX_SLACK	||
+                                                     m_screen->cursor.row < bbox_topleft.y - VTE_CELL_BBOX_SLACK)) {
+                                                        /* Clip off any part of the box which isn't already on-screen. */
+                                                        bbox_topleft.x = MAX(bbox_topleft.x, 0);
+                                                        bbox_topleft.y = MAX(bbox_topleft.y, top_row);
+                                                        bbox_bottomright.x = MIN(bbox_bottomright.x,
+                                                                                 m_column_count);
+                                                        /* lazily apply the +1 to the cursor_row */
+                                                        bbox_bottomright.y = MIN(bbox_bottomright.y + 1,
+                                                                                 bottom_row + 1);
 
-                case VTE_SEQ_NONE:
-                case VTE_SEQ_IGNORE:
-                        break;
+                                                        invalidate_cells(
+                                                                         bbox_topleft.x,
+                                                                         bbox_bottomright.x - bbox_topleft.x,
+                                                                         bbox_topleft.y,
+                                                                         bbox_bottomright.y - bbox_topleft.y);
+                                                        bbox_bottomright.x = bbox_bottomright.y = -G_MAXINT;
+                                                        bbox_topleft.x = bbox_topleft.y = G_MAXINT;
 
-                default: {
-                        switch (seq.command()) {
+                                                }
+                                                bbox_topleft.x = MIN(bbox_topleft.x, 0);
+                                                bbox_topleft.y = MIN(bbox_topleft.y,
+                                                                     m_screen->cursor.row);
+                                        }
+                                        /* Add the cells over which we have moved to the region
+                                         * which we need to refresh for the user. */
+                                        bbox_bottomright.x = MAX(bbox_bottomright.x,
+                                                                 m_screen->cursor.col);
+                                        /* cursor.row + 1 (defer until inv.) */
+                                        bbox_bottomright.y = MAX(bbox_bottomright.y,
+                                                                 m_screen->cursor.row);
+                                        invalidated_text = TRUE;
+
+                                        /* We *don't* emit flush pending signals here. */
+                                        modified = TRUE;
+
+                                        break;
+                                }
+
+                                case VTE_SEQ_NONE:
+                                case VTE_SEQ_IGNORE:
+                                        break;
+
+                                default: {
+                                        switch (seq.command()) {
 #define _VTE_CMD(cmd)   case VTE_CMD_##cmd: cmd(seq); break;
 #define _VTE_NOP(cmd)
 #include "parser-cmd.hh"
 #undef _VTE_CMD
 #undef _VTE_NOP
-                        default:
-                                _vte_debug_print(VTE_DEBUG_PARSER,
-                                                 "Unknown parser command %d\n", seq.command());
+                                        default:
+                                                _vte_debug_print(VTE_DEBUG_PARSER,
+                                                                 "Unknown parser command %d\n", seq.command());
+                                                break;
+                                        }
+
+                                        m_last_graphic_character = 0;
+
+                                        modified = TRUE;
+
+                                        // FIXME m_screen may be != previous_screen, check for that!
+
+                                        gboolean new_in_scroll_region = m_scrolling_restricted
+                                                && (m_screen->cursor.row >= (m_screen->insert_delta + m_scrolling_region.start))
+                                                && (m_screen->cursor.row <= (m_screen->insert_delta + m_scrolling_region.end));
+
+                                        /* delta may have changed from sequence. */
+                                        top_row = first_displayed_row();
+                                        bottom_row = last_displayed_row();
+
+                                        /* if we have moved greatly during the sequence handler, or moved
+                                         * into a scroll_region from outside it, restart the bbox.
+                                         */
+                                        if (invalidated_text &&
+                                            ((new_in_scroll_region && !in_scroll_region) ||
+                                             (m_screen->cursor.col > bbox_bottomright.x + VTE_CELL_BBOX_SLACK ||
+                                              m_screen->cursor.col < bbox_topleft.x - VTE_CELL_BBOX_SLACK     ||
+                                              m_screen->cursor.row > bbox_bottomright.y + VTE_CELL_BBOX_SLACK ||
+                                              m_screen->cursor.row < bbox_topleft.y - VTE_CELL_BBOX_SLACK))) {
+                                                /* Clip off any part of the box which isn't already on-screen. */
+                                                bbox_topleft.x = MAX(bbox_topleft.x, 0);
+                                                bbox_topleft.y = MAX(bbox_topleft.y, top_row);
+                                                bbox_bottomright.x = MIN(bbox_bottomright.x,
+                                                                         m_column_count);
+                                                /* lazily apply the +1 to the cursor_row */
+                                                bbox_bottomright.y = MIN(bbox_bottomright.y + 1,
+                                                                         bottom_row + 1);
+
+                                                invalidate_cells(
+                                                                 bbox_topleft.x,
+                                                                 bbox_bottomright.x - bbox_topleft.x,
+                                                                 bbox_topleft.y,
+                                                                 bbox_bottomright.y - bbox_topleft.y);
+
+                                                invalidated_text = FALSE;
+                                                bbox_bottomright.x = bbox_bottomright.y = -G_MAXINT;
+                                                bbox_topleft.x = bbox_topleft.y = G_MAXINT;
+                                        }
+
+                                        in_scroll_region = new_in_scroll_region;
+
+                                        break;
+                                }
+                                }
                                 break;
                         }
-
-                        m_last_graphic_character = 0;
-
-			modified = TRUE;
-
-                        // FIXME m_screen may be != previous_screen, check for that!
-
-                        gboolean new_in_scroll_region = m_scrolling_restricted
-                            && (m_screen->cursor.row >= (m_screen->insert_delta + m_scrolling_region.start))
-                            && (m_screen->cursor.row <= (m_screen->insert_delta + m_scrolling_region.end));
-
-                        /* delta may have changed from sequence. */
-                        top_row = first_displayed_row();
-                        bottom_row = last_displayed_row();
-
-			/* if we have moved greatly during the sequence handler, or moved
-                         * into a scroll_region from outside it, restart the bbox.
-                         */
-			if (invalidated_text &&
-					((new_in_scroll_region && !in_scroll_region) ||
-                                         (m_screen->cursor.col > bbox_bottomright.x + VTE_CELL_BBOX_SLACK ||
-                                          m_screen->cursor.col < bbox_topleft.x - VTE_CELL_BBOX_SLACK     ||
-                                          m_screen->cursor.row > bbox_bottomright.y + VTE_CELL_BBOX_SLACK ||
-                                          m_screen->cursor.row < bbox_topleft.y - VTE_CELL_BBOX_SLACK))) {
-				/* Clip off any part of the box which isn't already on-screen. */
-				bbox_topleft.x = MAX(bbox_topleft.x, 0);
-                                bbox_topleft.y = MAX(bbox_topleft.y, top_row);
-				bbox_bottomright.x = MIN(bbox_bottomright.x,
-						m_column_count);
-				/* lazily apply the +1 to the cursor_row */
-				bbox_bottomright.y = MIN(bbox_bottomright.y + 1,
-                                                bottom_row + 1);
-
-				invalidate_cells(
-						bbox_topleft.x,
-						bbox_bottomright.x - bbox_topleft.x,
-						bbox_topleft.y,
-						bbox_bottomright.y - bbox_topleft.y);
-
-				invalidated_text = FALSE;
-				bbox_bottomright.x = bbox_bottomright.y = -G_MAXINT;
-				bbox_topleft.x = bbox_topleft.y = G_MAXINT;
-			}
-
-			in_scroll_region = new_in_scroll_region;
-
-                        break;
-		}
+                        }
                 }
+        }
 
 #ifdef VTE_DEBUG
 		/* Some safety checks: ensure the visible parts of the buffer
@@ -3702,17 +3751,6 @@ skip_chunk:
 		 * part of the display buffer. */
                 g_assert_cmpint(m_screen->cursor.row, >=, m_screen->insert_delta);
 #endif
-	}
-
-	/* Remove most of the processed characters. */
-	if (wp < wend) {
-		g_array_remove_range(m_pending, 0, wp - wbuf);
-	} else {
-		g_array_set_size(m_pending, 0);
-		/* If we're out of data, we needn't pause to let the
-		 * controlling application respond to incoming data, because
-		 * the main loop is already going to do that. */
-	}
 
 	if (modified) {
 		/* Keep the cursor on-screen if we scroll on output, or if
@@ -3781,28 +3819,13 @@ skip_chunk:
         im_update_cursor();
 
         /* After processing some data, do a hyperlink GC. The multiplier is totally arbitrary, feel free to fine tune. */
-        _vte_ring_hyperlink_maybe_gc(m_screen->row_data, wcount * 4);
+        _vte_ring_hyperlink_maybe_gc(m_screen->row_data, bytes_processed * 8);
 
 	_vte_debug_print (VTE_DEBUG_WORK, ")");
 	_vte_debug_print (VTE_DEBUG_IO,
-			"%ld chars and %ld bytes in %" G_GSIZE_FORMAT " chunks left to process.\n",
-			(long) unichars->len,
-			(long) _vte_incoming_chunks_length(m_incoming),
-			_vte_incoming_chunks_count(m_incoming));
-}
-
-void
-Terminal::feed_chunks(struct _vte_incoming_chunk *chunks)
-{
-	struct _vte_incoming_chunk *last;
-
-	_vte_debug_print(VTE_DEBUG_IO, "Feed %" G_GSIZE_FORMAT " bytes, in %" G_GSIZE_FORMAT " chunks.\n",
-			_vte_incoming_chunks_length(chunks),
-			_vte_incoming_chunks_count(chunks));
-
-	for (last = chunks; last->next != NULL; last = last->next) ;
-	last->next = m_incoming;
-	m_incoming = chunks;
+                          "%" G_GSIZE_FORMAT " bytes in %" G_GSIZE_FORMAT " chunks left to process.\n",
+                          m_input_bytes,
+                          m_incoming_queue.size());
 }
 
 bool
@@ -3819,7 +3842,6 @@ Terminal::pty_io_read(GIOChannel *channel,
 
 	/* Read some data in from this channel. */
 	if (condition & (G_IO_IN | G_IO_PRI)) {
-		struct _vte_incoming_chunk *chunk, *chunks = NULL;
 		const int fd = g_io_channel_unix_get_fd (channel);
 		guchar *bp;
 		int rem, len;
@@ -3842,14 +3864,21 @@ Terminal::pty_io_read(GIOChannel *channel,
 		}
 		bytes = m_input_bytes;
 
-		chunk = m_incoming;
+                vte::base::Chunk* chunk = nullptr;
+                /* If possible, try adding more data to the chunk at the back of the queue */
+                if (!m_incoming_queue.empty())
+                        chunk = m_incoming_queue.back().get();
+
 		do {
-			if (!chunk || chunk->len >= 3*sizeof (chunk->data)/4) {
-				chunk = get_chunk ();
-				chunk->next = chunks;
-				chunks = chunk;
+                        /* No chunk, or chunk at least ¾ full? Get a new chunk */
+			if (!chunk ||
+                            chunk->len >= 3 * chunk->capacity() / 4) {
+                                m_incoming_queue.push(std::move(vte::base::Chunk::get()));
+
+                                chunk = m_incoming_queue.back().get();
 			}
-			rem = sizeof (chunk->data) - chunk->len;
+
+			rem = chunk->remaining_capacity();
 			bp = chunk->data + chunk->len;
 			len = 0;
 			do {
@@ -3902,15 +3931,12 @@ out:
 			chunk->len += len;
 			bytes += len;
 		} while (bytes < max_bytes &&
-		         chunk->len == sizeof (chunk->data));
-		if (chunk->len == 0 && chunk == chunks) {
-			chunks = chunks->next;
-			release_chunk (chunk);
-		}
+		         chunk->len == chunk->capacity());
 
-		if (chunks != NULL) {
-			feed_chunks(chunks);
-		}
+                /* We may have an empty chunk at the back of the queue, but
+                 * that doesn't matter, we'll fill it next time.
+                 */
+
 		if (!is_processing()) {
                         G_GNUC_BEGIN_IGNORE_DEPRECATIONS;
 			gdk_threads_enter ();
@@ -3983,42 +4009,50 @@ out:
  */
 void
 Terminal::feed(char const* data,
-                         gssize length,
+                         gssize length_,
                          bool start_processing_)
 {
-        g_assert(length == 0 || data != nullptr);
+        g_assert(length_ == 0 || data != nullptr);
 
-	if (length == -1)
+        size_t length;
+	if (length_ == -1)
 		length = strlen(data);
+        else
+                length = size_t(length_);
 
-	/* If we have data, modify the incoming buffer. */
-	if (length > 0) {
-		struct _vte_incoming_chunk *chunk;
-		if (m_incoming &&
-				(gsize)length < sizeof (m_incoming->data) - m_incoming->len) {
-			chunk = m_incoming;
-		} else {
-			chunk = get_chunk ();
-			feed_chunks(chunk);
-		}
-		do { /* break the incoming data into chunks */
-			gsize rem = sizeof (chunk->data) - chunk->len;
-			gsize len = (gsize) length < rem ? (gsize) length : rem;
-			memcpy (chunk->data + chunk->len, data, len);
-			chunk->len += len;
-			length -= len;
-			if (length == 0) {
-				break;
-			}
-			data += len;
+	if (length == 0)
+                return;
 
-			chunk = get_chunk ();
-			feed_chunks(chunk);
-		} while (1);
+        vte::base::Chunk* chunk = nullptr;
+        if (!m_incoming_queue.empty()) {
+                auto& achunk = m_incoming_queue.back();
+                if (length < achunk->remaining_capacity())
+                        chunk = achunk.get();
+        }
+        if (chunk == nullptr) {
+                m_incoming_queue.push(std::move(vte::base::Chunk::get()));
+                chunk = m_incoming_queue.back().get();
+        }
 
-                if (start_processing_)
-                        start_processing();
-	}
+        /* Break the incoming data into chunks. */
+        do {
+                auto rem = chunk->remaining_capacity();
+                auto len = std::min(length, rem);
+                memcpy (chunk->data + chunk->len, data, len);
+                chunk->len += len;
+                length -= len;
+                if (length == 0)
+                        break;
+
+                data += len;
+
+                /* Get another chunk for the remaining data */
+                m_incoming_queue.push(std::move(vte::base::Chunk::get()));
+                chunk = m_incoming_queue.back().get();
+        } while (true);
+
+        if (start_processing_)
+                start_processing();
 }
 
 bool
@@ -4035,15 +4069,9 @@ Terminal::pty_io_write(GIOChannel *channel,
 		      _vte_byte_array_length(m_outgoing));
 	if (count != -1) {
 		_VTE_DEBUG_IF (VTE_DEBUG_IO) {
-			gssize i;
-			for (i = 0; i < count; i++) {
-				g_printerr("Wrote %c%c\n",
-					((guint8)m_outgoing->data[i]) >= 32 ?
-					' ' : '^',
-					((guint8)m_outgoing->data[i]) >= 32 ?
-					m_outgoing->data[i] :
-					((guint8)m_outgoing->data[i])  + 64);
-			}
+                        _vte_debug_hexdump("Outgoing buffer written",
+                                           (uint8_t const*)m_outgoing->data,
+                                           count);
 		}
 		_vte_byte_array_consume(m_outgoing, count);
 	}
@@ -4063,79 +4091,93 @@ Terminal::send_child(char const* data,
                                gssize length,
                                bool local_echo) noexcept
 {
-	gsize icount, ocount;
-	const guchar *ibuf;
-	guchar *obuf, *obufptr;
 	gchar *cooked;
-	VteConv conv;
 	long cooked_length, i;
 
         if (!m_input_enabled)
                 return;
 
-        conv = m_outgoing_conv;
-	if (conv == VTE_INVALID_CONV)
-                return;
+        if (length == -1)
+                length = strlen(data);
 
-	icount = length;
-	ibuf = (const guchar *)data;
-	ocount = ((length + 1) * VTE_UTF8_BPC) + 1;
-	_vte_byte_array_set_minimum_size(m_conv_buffer, ocount);
-	obuf = obufptr = m_conv_buffer->data;
+#ifdef WITH_ICONV
+        if (m_using_utf8) {
+#endif /* WITH_ICONV */
+                cooked = (char*)data;
+                cooked_length = length;
+#ifdef WITH_ICONV
+        } else {
+                if (m_outgoing_conv == ((GIConv)-1))
+                        return;
 
-	if (_vte_conv(conv, &ibuf, &icount, &obuf, &ocount) == (gsize)-1) {
-		g_warning(_("Error (%s) converting data for child, dropping."),
-			  g_strerror(errno));
-	} else {
+                gsize icount;
+                icount = length;
+                auto ibuf = (char*)data;
+                gsize ocount = ((length + 1) * VTE_UTF8_BPC) + 1;
+                _vte_byte_array_set_minimum_size(m_conv_buffer, ocount);
+                char *obuf, *obufptr;
+                obuf = obufptr = (char*)m_conv_buffer->data;
+
+                if (_vte_conv(m_outgoing_conv, &ibuf, &icount, &obuf, &ocount) == (gsize)-1) {
+                        int errsv = errno;
+                        g_warning(_("Error (%s) converting data for child, dropping."),
+                                  g_strerror(errsv));
+                        return;
+                }
+
                 cooked = (gchar *)obufptr;
                 cooked_length = obuf - obufptr;
+        }
+#endif /* WITH_ICONV */
 
-		/* Tell observers that we're sending this to the child. */
-		if (cooked_length > 0) {
-			emit_commit(cooked, cooked_length);
-		}
-		/* Echo the text if we've been asked to do so. */
-		if ((cooked_length > 0) && local_echo) {
-			gunichar *ucs4;
-			ucs4 = g_utf8_to_ucs4(cooked, cooked_length,
-					      NULL, NULL, NULL);
-			if (ucs4 != NULL) {
-				int len;
-				len = g_utf8_strlen(cooked, cooked_length);
-				for (i = 0; i < len; i++) {
-					insert_char(
-								 ucs4[i],
-								 false,
-								 true);
-				}
-				g_free(ucs4);
-			}
-		}
-		/* If there's a place for it to go, add the data to the
-		 * outgoing buffer. */
-		if ((cooked_length > 0) && (m_pty != NULL)) {
-			_vte_byte_array_append(m_outgoing,
-					   cooked, cooked_length);
-			_VTE_DEBUG_IF(VTE_DEBUG_KEYBOARD) {
-				for (i = 0; i < cooked_length; i++) {
-					if ((((guint8) cooked[i]) < 32) ||
-					    (((guint8) cooked[i]) > 127)) {
-						g_printerr(
-							"Sending <%02x> "
-							"to child.\n",
-							cooked[i]);
-					} else {
-						g_printerr(
-							"Sending '%c' "
-							"to child.\n",
-							cooked[i]);
-					}
-				}
-			}
-			/* If we need to start waiting for the child pty to
-			 * become available for writing, set that up here. */
-			connect_pty_write();
-		}
+        /* Tell observers that we're sending this to the child. */
+        if (cooked_length > 0) {
+                emit_commit(cooked, cooked_length);
+        }
+        /* Echo the text if we've been asked to do so. */
+        if ((cooked_length > 0) && local_echo) {
+                gunichar *ucs4;
+                // FIXMEchpe: if (!m_using_utf8), then cooked is NOT UTF-8 !!!
+                // So I think this should use (data, length) not (cooked, cooked_length)
+                ucs4 = g_utf8_to_ucs4(cooked, cooked_length,
+                                      NULL, NULL, NULL);
+                if (ucs4 != NULL) {
+                        int len;
+                        len = g_utf8_strlen(cooked, cooked_length);
+                        for (i = 0; i < len; i++) {
+                                insert_char(
+                                            ucs4[i],
+                                            false,
+                                            true);
+                        }
+                        g_free(ucs4);
+                }
+        }
+
+        /* If there's a place for it to go, add the data to the
+         * outgoing buffer. */
+        // FIXMEchpe: shouldn't require m_pty for this
+        if ((cooked_length > 0) && (m_pty != NULL)) {
+                _vte_byte_array_append(m_outgoing, cooked, cooked_length);
+                _VTE_DEBUG_IF(VTE_DEBUG_KEYBOARD) {
+                        for (i = 0; i < cooked_length; i++) {
+                                if ((((guint8) cooked[i]) < 32) ||
+                                    (((guint8) cooked[i]) > 127)) {
+                                        g_printerr(
+                                                   "Sending <%02x> "
+                                                   "to child.\n",
+                                                   cooked[i]);
+                                } else {
+                                        g_printerr(
+                                                   "Sending '%c' "
+                                                   "to child.\n",
+                                                   cooked[i]);
+                                }
+                        }
+                }
+                /* If we need to start waiting for the child pty to
+                 * become available for writing, set that up here. */
+                connect_pty_write();
 	}
 }
 
@@ -4291,15 +4333,6 @@ Terminal::reply(vte::parser::Sequence const& seq,
         send(seq, builder);
 }
 
-/* Send text from the input method to the child. */
-static void
-vte_terminal_im_commit_cb(GtkIMContext *im_context,
-                          char const* text,
-                          vte::terminal::Terminal* that)
-{
-        that->im_commit(text);
-}
-
 void
 Terminal::im_commit(char const* text)
 {
@@ -4313,71 +4346,37 @@ Terminal::im_commit(char const* text)
 	}
 }
 
-/* We've started pre-editing. */
-static void
-vte_terminal_im_preedit_start_cb(GtkIMContext *im_context,
-                                 vte::terminal::Terminal* that)
+void
+Terminal::im_preedit_set_active(bool active) noexcept
 {
-        that->im_preedit_start();
+	m_im_preedit_active = active;
 }
 
 void
-Terminal::im_preedit_start()
+Terminal::im_preedit_reset() noexcept
 {
-	_vte_debug_print(VTE_DEBUG_EVENTS,
-			"Input method pre-edit started.\n");
-	m_im_preedit_active = true;
-}
-
-/* We've stopped pre-editing. */
-static void
-vte_terminal_im_preedit_end_cb(GtkIMContext *im_context,
-                               vte::terminal::Terminal* that)
-{
-        that->im_preedit_end();
+        m_im_preedit.clear();
+        m_im_preedit.shrink_to_fit();
+        m_im_preedit_cursor = 0;
+        if (m_im_preedit_attrs != nullptr) {
+                pango_attr_list_unref(m_im_preedit_attrs);
+                m_im_preedit_attrs = nullptr;
+        }
 }
 
 void
-Terminal::im_preedit_end()
+Terminal::im_preedit_changed(char const* str,
+                             int cursorpos,
+                             PangoAttrList* attrs) noexcept
 {
-	_vte_debug_print(VTE_DEBUG_EVENTS,
-			"Input method pre-edit ended.\n");
-	m_im_preedit_active = false;
-}
-
-/* The pre-edit string changed. */
-static void
-vte_terminal_im_preedit_changed_cb(GtkIMContext *im_context,
-                                   vte::terminal::Terminal* that)
-{
-        that->im_preedit_changed();
-}
-
-void
-Terminal::im_preedit_changed()
-{
-	gchar *str;
-	PangoAttrList *attrs;
-	gint cursorpos;
-
-	gtk_im_context_get_preedit_string(m_im_context, &str, &attrs, &cursorpos);
-	_vte_debug_print(VTE_DEBUG_EVENTS,
-			"Input method pre-edit changed (%s,%d).\n",
-			str, cursorpos);
-
 	/* Queue the area where the current preedit string is being displayed
 	 * for repainting. */
 	invalidate_cursor_once();
 
+        im_preedit_reset();
 	m_im_preedit = str;
-        g_free(str);
-
-	if (m_im_preedit_attrs != NULL) {
-		pango_attr_list_unref(m_im_preedit_attrs);
-	}
-	m_im_preedit_attrs = attrs;
-
-	m_im_preedit_cursor = cursorpos;
+        m_im_preedit_attrs = attrs;
+        m_im_preedit_cursor = cursorpos;
 
         /* Invalidate again with the new cursor position */
 	invalidate_cursor_once();
@@ -4386,39 +4385,18 @@ Terminal::im_preedit_changed()
         im_update_cursor();
 }
 
-static gboolean
-vte_terminal_im_retrieve_surrounding_cb(GtkIMContext *im_context,
-                                        vte::terminal::Terminal* that)
-{
-        return that->im_retrieve_surrounding();
-}
-
 bool
 Terminal::im_retrieve_surrounding()
 {
         /* FIXME: implement this! Bug #726191 */
-        _vte_debug_print(VTE_DEBUG_EVENTS,
-                         "Input method retrieve-surrounding.\n");
         return false;
-}
-
-static gboolean
-vte_terminal_im_delete_surrounding_cb(GtkIMContext *im_context,
-                                      int offset,
-                                      int n_chars,
-                                      vte::terminal::Terminal* that)
-{
-        return that->im_delete_surrounding(offset, n_chars);
 }
 
 bool
 Terminal::im_delete_surrounding(int offset,
-                                          int n_chars)
+                                int n_chars)
 {
         /* FIXME: implement this! Bug #726191 */
-        _vte_debug_print(VTE_DEBUG_EVENTS,
-                         "Input method delete-surrounding offset %d n-chars %d.\n",
-                         offset, n_chars);
         return false;
 }
 
@@ -4434,7 +4412,7 @@ Terminal::im_update_cursor()
         rect.width = m_cell_width; // FIXMEchpe: if columns > 1 ?
         rect.y = row_to_pixel(m_screen->cursor.row) + m_padding.top;
         rect.height = m_cell_height;
-        gtk_im_context_set_cursor_location(m_im_context, &rect);
+        m_real_widget->im_set_cursor_location(&rect);
 }
 
 void
@@ -4525,10 +4503,8 @@ Terminal::remove_text_blink_timeout()
 void
 Terminal::beep()
 {
-	if (m_audible_bell) {
-                GdkWindow *window = gtk_widget_get_window(m_widget);
-                gdk_window_beep(window);
-	}
+	if (m_audible_bell)
+                m_real_widget->beep();
 }
 
 guint
@@ -4717,7 +4693,7 @@ Terminal::widget_key_press(GdkEventKey *event)
 
 	/* Let the input method at this one first. */
 	if (!steal && m_input_enabled) {
-		if (m_im_context && gtk_im_context_filter_keypress(m_im_context, event)) {
+                if (m_real_widget->im_filter_keypress(event)) {
 			_vte_debug_print(VTE_DEBUG_EVENTS,
 					"Keypress taken by IM.\n");
 			return true;
@@ -5011,8 +4987,7 @@ Terminal::widget_key_release(GdkEventKey *event)
 	read_modifiers((GdkEvent*)event);
 
 	if (m_input_enabled &&
-            m_im_context &&
-            gtk_im_context_filter_keypress(m_im_context, event))
+            m_real_widget->im_filter_keypress(event))
                 return true;
 
         return false;
@@ -5795,7 +5770,6 @@ Terminal::get_text(vte::grid::row_t start_row,
                              vte::grid::column_t end_col,
                              bool block,
                              bool wrap,
-                             bool include_trailing_spaces,
                              GArray *attributes)
 {
 	const VteCell *pcell = NULL;
@@ -5817,12 +5791,7 @@ Terminal::get_text(vte::grid::row_t start_row,
         vte::grid::row_t row;
 	for (row = start_row; row < end_row + 1; row++, col = next_first_column) {
 		VteRowData const* row_data = find_row_data(row);
-                gsize last_empty, last_nonempty;
-                vte::grid::column_t last_emptycol, last_nonemptycol;
                 vte::grid::column_t line_last_column = (block || row == end_row) ? end_col : G_MAXLONG;
-
-		last_empty = last_nonempty = string->len;
-		last_emptycol = last_nonemptycol = -1;
 
 		attr.row = row;
 		attr.column = col;
@@ -5855,12 +5824,8 @@ Terminal::get_text(vte::grid::row_t start_row,
 					/* Store the cell string */
 					if (pcell->c == 0) {
 						g_string_append_c (string, ' ');
-						last_empty = string->len;
-						last_emptycol = col;
 					} else {
 						_vte_unistr_append_to_string (pcell->c, string);
-						last_nonempty = string->len;
-						last_nonemptycol = col;
 					}
 
 					/* If we added text to the string, record its
@@ -5872,32 +5837,6 @@ Terminal::get_text(vte::grid::row_t start_row,
 				}
 
 				col++;
-			}
-		}
-
-	       /* If the last thing we saw was a empty, and we stopped at the
-		* right edge of the range, trim the trailing spaces
-		* off of the line. */
-		if (!include_trailing_spaces && last_empty > last_nonempty) {
-
-			col = last_emptycol + 1;
-
-			if (row_data != NULL) {
-				while ((pcell = _vte_row_data_get (row_data, col))) {
-					col++;
-
-					if (pcell->attr.fragment())
-						continue;
-
-					if (pcell->c != 0)
-						break;
-				}
-			}
-			if (pcell == NULL) {
-				g_string_truncate(string, last_nonempty);
-				if (attributes)
-					g_array_set_size(attributes, string->len);
-				attr.column = last_nonemptycol;
 			}
 		}
 
@@ -5934,12 +5873,11 @@ Terminal::get_text(vte::grid::row_t start_row,
 
 GString*
 Terminal::get_text_displayed(bool wrap,
-                                       bool include_trailing_spaces,
                                        GArray *attributes)
 {
         return get_text(first_displayed_row(), 0,
                         last_displayed_row() + 1, -1,
-                        false /* block */, wrap, include_trailing_spaces,
+                        false /* block */, wrap,
                         attributes);
 }
 
@@ -5948,12 +5886,11 @@ Terminal::get_text_displayed(bool wrap,
  */
 GString*
 Terminal::get_text_displayed_a11y(bool wrap,
-                                            bool include_trailing_spaces,
                                             GArray *attributes)
 {
         return get_text(m_screen->scroll_delta, 0,
                         m_screen->scroll_delta + m_row_count - 1 + 1, -1,
-                        false /* block */, wrap, include_trailing_spaces,
+                        false /* block */, wrap,
                         attributes);
 }
 
@@ -5966,7 +5903,6 @@ Terminal::get_selected_text(GArray *attributes)
                         m_selection_end.col,
                         m_selection_block_mode,
                         true /* wrap */,
-                        false /* include trailing whitespace */,
                         attributes);
 }
 
@@ -5981,7 +5917,6 @@ Terminal::checksum_area(vte::grid::row_t start_row,
 
         auto text = get_text(start_row, start_col, end_row, end_col,
                              true /* block */, false /* wrap */,
-                             true /* trailing whitespace */,
                              nullptr /* not interested in attributes */);
         if (text == nullptr)
                 return checksum;
@@ -7268,7 +7203,7 @@ Terminal::widget_focus_in(GdkEventFocus *event)
 
 		check_cursor_blink();
 
-		gtk_im_context_focus_in(m_im_context);
+                m_real_widget->im_focus_in();
 		invalidate_cursor_once();
                 maybe_feed_focus_event(true);
 	}
@@ -7297,7 +7232,7 @@ Terminal::widget_focus_out(GdkEventFocus *event)
                         invalidate_all();
                 }
 
-		gtk_im_context_focus_out(m_im_context);
+                m_real_widget->im_focus_out();
 		invalidate_cursor_once();
 
                 m_mouse_pressed_buttons = 0;
@@ -7891,7 +7826,9 @@ Terminal::widget_set_vadjustment(GtkAdjustment *adjustment)
 				 this);
 }
 
-Terminal::Terminal(VteTerminal *t) :
+Terminal::Terminal(vte::platform::Widget* w,
+                   VteTerminal *t) :
+        m_real_widget(w),
         m_terminal(t),
         m_widget(&t->widget),
         m_row_count(VTE_ROWS),
@@ -7966,19 +7903,18 @@ Terminal::Terminal(VteTerminal *t) :
 		m_palette[i].sources[VTE_COLOR_SOURCE_ESCAPE].is_set = FALSE;
 
 	/* Set up I/O encodings. */
+        g_assert_true(m_using_utf8);
         m_utf8_ambiguous_width = VTE_DEFAULT_UTF8_AMBIGUOUS_WIDTH;
-        m_iso2022 = _vte_iso2022_state_new(m_encoding);
-	m_incoming = nullptr;
-	m_pending = g_array_new(FALSE, TRUE, sizeof(gunichar));
 	m_max_input_bytes = VTE_MAX_INPUT_READ;
 	m_cursor_blink_tag = 0;
         m_text_blink_tag = 0;
 	m_outgoing = _vte_byte_array_new();
-	m_outgoing_conv = VTE_INVALID_CONV;
-	m_conv_buffer = _vte_byte_array_new();
-	set_encoding(nullptr /* UTF-8 */);
-	g_assert_cmpstr(m_encoding, ==, "UTF-8");
         m_last_graphic_character = 0;
+
+#ifdef WITH_ICONV
+        m_incoming_leftover = _vte_byte_array_new();
+	m_conv_buffer = _vte_byte_array_new();
+#endif
 
 	/* Setting the terminal type and size requires the PTY master to
 	 * be set up properly first. */
@@ -7986,7 +7922,6 @@ Terminal::Terminal(VteTerminal *t) :
         set_size(VTE_COLUMNS, VTE_ROWS);
 	m_pty_input_source = 0;
 	m_pty_output_source = 0;
-	m_pty_pid = -1;
 
 	/* Scrolling options. */
 	m_scroll_on_keystroke = TRUE;
@@ -8006,7 +7941,7 @@ Terminal::Terminal(VteTerminal *t) :
 	m_audible_bell = TRUE;
         m_text_blink_mode = VTE_TEXT_BLINK_ALWAYS;
 	m_allow_bold = TRUE;
-        m_bold_is_bright = TRUE;
+        m_bold_is_bright = FALSE;
         m_rewrap_on_resize = TRUE;
 
         m_input_enabled = TRUE;
@@ -8068,8 +8003,8 @@ Terminal::Terminal(VteTerminal *t) :
         update_view_extents();
 
 #ifdef VTE_DEBUG
-        if (g_test_mode) {
-                static char const warning[] = "\e[1m\e[31mWARNING:\e[39m Test mode enabled.\e[0m\n\e[G";
+        if (g_test_flags != 0) {
+                static char const warning[] = "\e[1m\e[31mWARNING:\e[39m Test mode enabled. This is insecure!\e[0m\n\e[G";
                 feed(warning, strlen(warning), false);
         }
 #endif
@@ -8193,13 +8128,7 @@ Terminal::widget_size_allocate(GtkAllocation *allocation)
 		queue_contents_changed();
 	}
 
-	/* Resize the GDK window. */
 	if (widget_realized()) {
-		gdk_window_move_resize(m_event_window,
-					allocation->x,
-					allocation->y,
-					allocation->width,
-					allocation->height);
 		/* Force a repaint if we were resized. */
 		if (repaint) {
 			reset_update_rects();
@@ -8211,36 +8140,12 @@ Terminal::widget_size_allocate(GtkAllocation *allocation)
 void
 Terminal::widget_unrealize()
 {
-	_vte_debug_print(VTE_DEBUG_LIFECYCLE, "vte_terminal_unrealize()\n");
-
 	/* Deallocate the cursors. */
         m_mouse_cursor_over_widget = FALSE;
-        m_mouse_default_cursor.reset();
-        m_mouse_mousing_cursor.reset();
-        m_mouse_hyperlink_cursor.reset();
-        m_mouse_inviso_cursor.reset();
 
 	match_hilite_clear();
 
-	/* Shut down input methods. */
-	if (m_im_context != nullptr) {
-	        g_signal_handlers_disconnect_matched(m_im_context, G_SIGNAL_MATCH_DATA,
-                                                     0, 0, NULL, NULL,
-                                                     this);
-		im_reset();
-		gtk_im_context_set_client_window(m_im_context,
-						 NULL);
-		g_object_unref(m_im_context);
-		m_im_context = nullptr;
-	}
 	m_im_preedit_active = FALSE;
-        m_im_preedit.clear();
-        m_im_preedit.shrink_to_fit();
-	if (m_im_preedit_attrs != NULL) {
-		pango_attr_list_unref(m_im_preedit_attrs);
-		m_im_preedit_attrs = NULL;
-	}
-	m_im_preedit_cursor = 0;
 
 	/* Clean up our draw structure. */
 	if (m_draw != NULL) {
@@ -8273,38 +8178,13 @@ Terminal::widget_unrealize()
 
 	/* Clear modifiers. */
 	m_modifiers = 0;
-
-        /* Destroy the even window */
-        gtk_widget_unregister_window(m_widget, m_event_window);
-        gdk_window_destroy(m_event_window);
-        m_event_window = nullptr;
-}
-
-static void
-vte_terminal_settings_notify_cb (GtkSettings *settings,
-                                 GParamSpec *pspec,
-                                 vte::terminal::Terminal* that)
-{
-        that->widget_settings_notify();
 }
 
 void
-Terminal::widget_settings_notify()
+Terminal::set_blink_settings(bool blink,
+                             int blink_time,
+                             int blink_timeout) noexcept
 {
-        gboolean blink;
-        int blink_time = 1000;
-        int blink_timeout = G_MAXINT;
-
-        g_object_get(gtk_widget_get_settings(m_widget),
-                     "gtk-cursor-blink", &blink,
-                     "gtk-cursor-blink-time", &blink_time,
-                     "gtk-cursor-blink-timeout", &blink_timeout,
-                     nullptr);
-
-        _vte_debug_print(VTE_DEBUG_MISC,
-                         "Cursor blinking settings: blink=%d time=%d timeout=%d\n",
-                         blink, blink_time, blink_timeout);
-
         m_cursor_blink_cycle = blink_time / 2;
         m_cursor_blink_timeout = blink_timeout;
 
@@ -8321,49 +8201,23 @@ Terminal::widget_settings_notify()
         }
 }
 
-void
-Terminal::widget_screen_changed (GdkScreen *previous_screen)
-{
-        GtkSettings *settings;
-
-        auto gdk_screen = gtk_widget_get_screen (m_widget);
-        if (previous_screen != NULL &&
-            (gdk_screen != previous_screen || gdk_screen == NULL)) {
-                settings = gtk_settings_get_for_screen (previous_screen);
-                g_signal_handlers_disconnect_matched (settings, G_SIGNAL_MATCH_DATA,
-                                                      0, 0, NULL, NULL,
-                                                      this);
-        }
-
-        if (gdk_screen == previous_screen || gdk_screen == nullptr)
-                return;
-
-        widget_settings_notify();
-
-        settings = gtk_widget_get_settings(m_widget);
-        g_signal_connect (settings, "notify::gtk-cursor-blink",
-                          G_CALLBACK (vte_terminal_settings_notify_cb), this);
-        g_signal_connect (settings, "notify::gtk-cursor-blink-time",
-                          G_CALLBACK (vte_terminal_settings_notify_cb), this);
-        g_signal_connect (settings, "notify::gtk-cursor-blink-timeout",
-                          G_CALLBACK (vte_terminal_settings_notify_cb), this);
-}
-
 Terminal::~Terminal()
 {
 	struct vte_match_regex *regex;
 	int sel;
 	guint i;
 
-	_vte_debug_print(VTE_DEBUG_LIFECYCLE, "vte_terminal_finalize()\n");
+        terminate_child();
+        set_pty(nullptr);
+        remove_update_timeout(this);
+
+        /* Stop processing input. */
+        stop_processing(this);
 
 	/* Free the draw structure. */
 	if (m_draw != NULL) {
 		_vte_draw_free(m_draw);
 	}
-
-	/* The NLS maps. */
-	_vte_iso2022_state_free(m_iso2022);
 
 	/* Free the font description. */
         if (m_unscaled_font_desc != NULL) {
@@ -8419,10 +8273,13 @@ Terminal::~Terminal()
 		}
 	}
 
+#ifdef WITH_ICONV
 	/* Free conversion descriptors. */
-	if (m_outgoing_conv != VTE_INVALID_CONV) {
-		_vte_conv_close(m_outgoing_conv);
-		m_outgoing_conv = VTE_INVALID_CONV;
+	if (m_incoming_conv != ((GIConv)-1)) {
+		g_iconv_close(m_incoming_conv);
+	}
+	if (m_outgoing_conv != ((GIConv)-1)) {
+		g_iconv_close(m_outgoing_conv);
 	}
 
 	/* Start listening for child-exited signals and ignore them, so that no zombie child is left behind. */
@@ -8435,36 +8292,9 @@ Terminal::~Terminal()
                                        NULL, NULL);
         }
 
-	/* Stop processing input. */
-	stop_processing(this);
-
 	/* Discard any pending data. */
-	_vte_incoming_chunks_release(m_incoming);
 	_vte_byte_array_free(m_outgoing);
-	g_array_free(m_pending, TRUE);
-	_vte_byte_array_free(m_conv_buffer);
-
-	/* Stop the child and stop watching for input from the child. */
-	if (m_pty_pid != -1) {
-#ifdef HAVE_GETPGID
-		pid_t pgrp;
-		pgrp = getpgid(m_pty_pid);
-		if (pgrp != -1) {
-			kill(-pgrp, SIGHUP);
-		}
-#endif
-		kill(m_pty_pid, SIGHUP);
-	}
-	disconnect_pty_read();
-	disconnect_pty_write();
-	if (m_pty_channel != NULL) {
-		g_io_channel_unref (m_pty_channel);
-	}
-	if (m_pty != NULL) {
-                g_object_unref(m_pty);
-	}
-
-	remove_update_timeout(this);
+        m_outgoing = nullptr;
 
 	/* Free public-facing data. */
 	if (m_vadjustment != NULL) {
@@ -8486,103 +8316,19 @@ Terminal::~Terminal()
 void
 Terminal::widget_realize()
 {
-	_vte_debug_print(VTE_DEBUG_LIFECYCLE, "vte_terminal_realize()\n");
-
-        auto allocation = get_allocated_rect();
-
-	/* Create the stock cursors. */
         m_mouse_cursor_over_widget = FALSE;  /* We'll receive an enter_notify_event if the window appears under the cursor. */
-	m_mouse_default_cursor = widget_cursor_new(VTE_DEFAULT_CURSOR);
-	m_mouse_mousing_cursor = widget_cursor_new(VTE_MOUSING_CURSOR);
-        if (_vte_debug_on(VTE_DEBUG_HYPERLINK))
-                /* Differ from the standard regex match cursor in debug mode. */
-                m_mouse_hyperlink_cursor = widget_cursor_new(VTE_HYPERLINK_CURSOR_DEBUG);
-        else
-                m_mouse_hyperlink_cursor = widget_cursor_new(VTE_HYPERLINK_CURSOR);
-	m_mouse_inviso_cursor = widget_cursor_new(GDK_BLANK_CURSOR);
-
-	/* Create a GDK window for the widget. */
-	GdkWindowAttr attributes;
-	attributes.window_type = GDK_WINDOW_CHILD;
-	attributes.x = allocation.x;
-	attributes.y = allocation.y;
-	attributes.width = allocation.width;
-	attributes.height = allocation.height;
-	attributes.wclass = GDK_INPUT_ONLY;
-	attributes.visual = gtk_widget_get_visual(m_widget);
-	attributes.event_mask = gtk_widget_get_events(m_widget) |
-				GDK_EXPOSURE_MASK |
-				GDK_FOCUS_CHANGE_MASK |
-				GDK_SMOOTH_SCROLL_MASK |
-				GDK_SCROLL_MASK |
-				GDK_BUTTON_PRESS_MASK |
-				GDK_BUTTON_RELEASE_MASK |
-				GDK_POINTER_MOTION_MASK |
-				GDK_BUTTON1_MOTION_MASK |
-				GDK_ENTER_NOTIFY_MASK |
-				GDK_LEAVE_NOTIFY_MASK |
-				GDK_KEY_PRESS_MASK |
-				GDK_KEY_RELEASE_MASK;
-	attributes.cursor = m_mouse_default_cursor.get();
-	guint attributes_mask = GDK_WA_X |
-                                GDK_WA_Y |
-                                (attributes.visual ? GDK_WA_VISUAL : 0) |
-                                GDK_WA_CURSOR;
-
-	m_event_window = gdk_window_new(gtk_widget_get_parent_window (m_widget),
-                                        &attributes, attributes_mask);
-        gtk_widget_register_window(m_widget, m_event_window);
 
 	/* Create rendering data if this is a re-realise */
         if (m_draw == NULL) {
                 m_draw = _vte_draw_new();
         }
 
-        // FIXMEchpe this shouldn't ever be true:
-	if (m_im_context != nullptr) {
-	        g_signal_handlers_disconnect_matched(m_im_context, G_SIGNAL_MATCH_DATA,
-                                                     0, 0, NULL, NULL,
-                                                     this);
-		im_reset();
-		gtk_im_context_set_client_window(m_im_context, nullptr);
-		g_object_unref(m_im_context);
-		m_im_context = nullptr;
-	}
 	m_im_preedit_active = FALSE;
-	m_im_context = gtk_im_multicontext_new();
-	gtk_im_context_set_client_window(m_im_context, m_event_window);
-	g_signal_connect(m_im_context, "commit",
-			 G_CALLBACK(vte_terminal_im_commit_cb), this);
-	g_signal_connect(m_im_context, "preedit-start",
-			 G_CALLBACK(vte_terminal_im_preedit_start_cb), this);
-	g_signal_connect(m_im_context, "preedit-changed",
-			 G_CALLBACK(vte_terminal_im_preedit_changed_cb), this);
-	g_signal_connect(m_im_context, "preedit-end",
-			 G_CALLBACK(vte_terminal_im_preedit_end_cb), this);
-	g_signal_connect(m_im_context, "retrieve-surrounding",
-			 G_CALLBACK(vte_terminal_im_retrieve_surrounding_cb), this);
-	g_signal_connect(m_im_context, "delete-surrounding",
-			 G_CALLBACK(vte_terminal_im_delete_surrounding_cb), this);
-	gtk_im_context_set_use_preedit(m_im_context, TRUE);
 
 	/* Clear modifiers. */
 	m_modifiers = 0;
 
 	ensure_font();
-}
-
-void
-Terminal::widget_map()
-{
-        if (m_event_window)
-                gdk_window_show_unraised(m_event_window);
-}
-
-void
-Terminal::widget_unmap()
-{
-        if (m_event_window)
-                gdk_window_hide(m_event_window);
 }
 
 static inline void
@@ -9111,10 +8857,7 @@ Terminal::translate_pango_cells(PangoAttrList *attrs,
 								 attr->start_index,
 								 MIN(n_cells, attr->end_index) -
 								 attr->start_index);
-				g_slist_foreach(list,
-                                                (GFunc)pango_attribute_destroy,
-						nullptr);
-				g_slist_free(list);
+				g_slist_free_full(list, (GDestroyNotify)pango_attribute_destroy);
 			}
 		} while (pango_attr_iterator_next(attriter) == TRUE);
 		pango_attr_iterator_destroy(attriter);
@@ -10387,10 +10130,16 @@ Terminal::reset(bool clear_tabstops,
 	/* Clear the output buffer. */
 	_vte_byte_array_clear(m_outgoing);
 	/* Reset charset substitution state. */
-	_vte_iso2022_state_free(m_iso2022);
-        m_iso2022 = _vte_iso2022_state_new(nullptr);
-	_vte_iso2022_state_set_codeset(m_iso2022,
-				       m_encoding);
+
+        m_utf8_decoder.reset();
+
+#ifdef WITH_ICONV
+        if (m_incoming_conv != ((GIConv)-1)) {
+                /* Reset the converter state */
+                g_iconv(m_incoming_conv, nullptr, nullptr, nullptr, nullptr);
+        }
+        _vte_byte_array_clear(m_incoming_leftover);
+#endif
 
         /* Reset parser */
         m_parser.reset();
@@ -10485,36 +10234,38 @@ Terminal::set_pty(VtePty *new_pty)
         if (new_pty == m_pty)
                 return false;
 
-        if (m_pty != NULL) {
+        if (m_pty != nullptr) {
                 disconnect_pty_read();
                 disconnect_pty_write();
 
-                if (m_pty_channel != NULL) {
+                if (m_pty_channel != nullptr) {
                         g_io_channel_unref (m_pty_channel);
-                        m_pty_channel = NULL;
+                        m_pty_channel = nullptr;
                 }
 
 		/* Take one last shot at processing whatever data is pending,
 		 * then flush the buffers in case we're about to run a new
 		 * command, disconnecting the timeout. */
-		if (m_incoming != NULL) {
+		if (!m_incoming_queue.empty()) {
 			process_incoming();
-			_vte_incoming_chunks_release (m_incoming);
-			m_incoming = NULL;
+                        while (!m_incoming_queue.empty())
+                                m_incoming_queue.pop();
+
 			m_input_bytes = 0;
 		}
-		g_array_set_size(m_pending, 0);
 		stop_processing(this);
+
+                m_utf8_decoder.reset(); // FIXMEchpe necessary here?
 
 		/* Clear the outgoing buffer as well. */
 		_vte_byte_array_clear(m_outgoing);
 
                 g_object_unref(m_pty);
-                m_pty = NULL;
+                m_pty = nullptr;
         }
 
-        if (new_pty == NULL) {
-                m_pty = NULL;
+        if (new_pty == nullptr) {
+                m_pty = nullptr;
                 return true;
         }
 
@@ -10531,15 +10282,31 @@ Terminal::set_pty(VtePty *new_pty)
         set_size(m_column_count, m_row_count);
 
         GError *error = nullptr;
-        if (!vte_pty_set_utf8(m_pty,
-                              strcmp(m_encoding, "UTF-8") == 0,
-                              &error)) {
+        if (!vte_pty_set_utf8(m_pty, m_using_utf8, &error)) {
                 g_warning ("Failed to set UTF8 mode: %s\n", error->message);
                 g_error_free (error);
         }
 
         /* Open channels to listen for input on. */
         connect_pty_read();
+
+        return true;
+}
+
+bool
+Terminal::terminate_child() noexcept
+{
+	if (m_pty_pid == -1)
+                return false;
+
+#ifdef HAVE_GETPGID
+        auto pgrp = getpgid(m_pty_pid);
+        if (pgrp != -1) {
+                kill(-pgrp, SIGHUP);
+        }
+#endif
+        kill(m_pty_pid, SIGHUP);
+        m_pty_pid = -1;
 
         return true;
 }
@@ -10804,8 +10571,6 @@ Terminal::time_process_incoming()
 bool
 Terminal::process(bool emit_adj_changed)
 {
-        bool is_active;
-
         if (m_pty_channel) {
                 if (m_pty_input_active ||
                     m_pty_input_source == 0) {
@@ -10816,7 +10581,8 @@ Terminal::process(bool emit_adj_changed)
         }
         if (emit_adj_changed)
                 emit_adjustment_changed();
-        is_active = _vte_incoming_chunks_length(m_incoming) != 0;
+
+        bool is_active = !m_incoming_queue.empty();
         if (is_active) {
                 if (VTE_MAX_PROCESS_TIME) {
                         time_process_incoming();
@@ -10892,7 +10658,7 @@ process_timeout (gpointer data)
 		g_usleep (0);
 	} else if (update_timeout_tag == 0) {
 		/* otherwise free up memory used to capture incoming data */
-		prune_chunks (10);
+                vte::base::Chunk::prune();
 	}
 
 	return again;
@@ -10996,7 +10762,7 @@ update_repeat_timeout (gpointer data)
 		g_usleep (0);
 	} else {
 		/* otherwise free up memory used to capture incoming data */
-		prune_chunks (10);
+                vte::base::Chunk::prune();
 	}
 
         return FALSE;  /* If we need to go again, we already have a new timer for that. */
@@ -11127,7 +10893,6 @@ Terminal::search_rows(pcre2_match_context_8 *match_context,
                                  end_row, -1,
                                  false /* block */,
                                  true /* wrap */,
-                                 false /* include trailing whitespace */, /* FIXMEchpe maybe do include it since the match may depend on it? */
                                  nullptr);
 
         int (* match_fn) (const pcre2_code_8 *,
@@ -11179,7 +10944,6 @@ Terminal::search_rows(pcre2_match_context_8 *match_context,
                             end_row, -1,
                             false /* block */,
                             true /* wrap */,
-                            false /* include trailing whitespace */, /* FIXMEchpe maybe true? */
                             attrs);
 
 	ca = &g_array_index (attrs, VteCharAttributes, start);
@@ -11346,13 +11110,13 @@ Terminal::set_input_enabled (bool enabled)
 
         if (enabled) {
                 if (gtk_widget_has_focus(m_widget))
-                        gtk_im_context_focus_in(m_im_context);
+                        m_real_widget->im_focus_in();
 
                 gtk_style_context_remove_class (context, GTK_STYLE_CLASS_READ_ONLY);
         } else {
                 im_reset();
                 if (gtk_widget_has_focus(m_widget))
-                        gtk_im_context_focus_out(m_im_context);
+                        m_real_widget->im_focus_out();
 
                 disconnect_pty_write();
                 _vte_byte_array_clear(m_outgoing);

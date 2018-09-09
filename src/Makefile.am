@@ -49,11 +49,11 @@ libvte_@VTE_API_MAJOR_VERSION@_@VTE_API_MINOR_VERSION@_la_SOURCES = \
 	buffer.h \
 	caps.hh \
 	cell.hh \
+	chunk.cc \
+	chunk.hh \
 	color-triple.hh \
 	debug.cc \
 	debug.h \
-	iso2022.cc \
-	iso2022.h \
 	keymap.cc \
 	keymap.h \
 	modes.hh \
@@ -77,11 +77,11 @@ libvte_@VTE_API_MAJOR_VERSION@_@VTE_API_MINOR_VERSION@_la_SOURCES = \
 	refptr.hh \
 	ring.cc \
 	ring.hh \
+	utf8.cc \
+	utf8.hh \
 	vte.cc \
 	vteaccess.cc \
 	vteaccess.h \
-	vteconv.cc \
-	vteconv.h \
 	vtedefines.hh \
 	vtedraw.cc \
 	vtedraw.hh \
@@ -107,6 +107,8 @@ libvte_@VTE_API_MAJOR_VERSION@_@VTE_API_MINOR_VERSION@_la_SOURCES = \
 	vteunistr.h \
 	vteutils.cc \
 	vteutils.h \
+	widget.cc \
+	widget.hh \
 	$(NULL)
 
 nodist_libvte_@VTE_API_MAJOR_VERSION@_@VTE_API_MINOR_VERSION@_la_SOURCES = \
@@ -185,7 +187,7 @@ vteresources.cc: vte.gresource.xml Makefile $(shell $(GLIB_COMPILE_RESOURCES) --
 
 # Misc unit tests and utilities
 
-noinst_PROGRAMS += parser-cat slowcat test-modes test-tabstops test-parser test-refptr
+noinst_PROGRAMS += parser-cat slowcat test-modes test-tabstops test-parser test-refptr test-utf8
 noinst_SCRIPTS = decset osc window
 EXTRA_DIST += $(noinst_SCRIPTS)
 
@@ -194,7 +196,6 @@ check_PROGRAMS = \
 	reflect-text-view \
 	reflect-vte mev \
 	xticker \
-	vteconv \
 	vtestream-file \
 	test-vtetypes \
 	$(NULL)
@@ -209,8 +210,8 @@ TESTS = \
 	test-parser \
 	test-refptr \
 	test-tabstops \
+	test-utf8 \
 	test-vtetypes \
-	vteconv \
 	vtestream-file \
 	$(dist_check_SCRIPTS) \
 	$(NULL)
@@ -236,8 +237,6 @@ parser_cat_SOURCES = \
 	caps.hh \
 	debug.cc \
 	debug.h \
-	iso2022.cc \
-	iso2022.h \
 	parser.cc \
 	parser.hh \
 	parser-arg.hh \
@@ -253,8 +252,8 @@ parser_cat_SOURCES = \
 	parser-reply.hh \
 	parser-string.hh \
 	parser-cat.cc \
-	vteconv.cc \
-	vteconv.h \
+	utf8.cc \
+	utf8.hh \
 	$(NULL)
 parser_cat_CPPFLAGS = \
 	-I$(builddir) \
@@ -353,6 +352,22 @@ test_refptr_LDADD = \
 	$(GOBJECT_LIBS) \
 	$(NULL)
 
+test_utf8_SOURCES = \
+	utf8-test.cc \
+	utf8.cc \
+	utf8.hh \
+	$(NULL)
+test_utf8_CPPFLAGS = \
+	-I$(builddir) \
+	-I$(srcdir) \
+	$(AM_CPPFLAGS)
+test_utf8_CXXFLAGS = \
+	$(GLIB_CFLAGS) \
+	$(AM_CXXFLAGS)
+test_utf8_LDADD = \
+	$(GLIB_LIBS) \
+	$(NULL)
+
 test_vtetypes_SOURCES = \
 	vtetypes.cc \
 	vtetypes.hh \
@@ -387,11 +402,6 @@ vtestream_file_CXXFLAGS = \
 	$(AM_CXXFLAGS)
 vtestream_file_LDADD = \
 	$(VTE_LIBS)
-
-vteconv_SOURCES = buffer.h debug.cc debug.h vteconv.cc vteconv.h
-vteconv_CPPFLAGS = -DVTECONV_MAIN -I$(builddir) -I$(srcdir) $(AM_CPPFLAGS)
-vteconv_CXXFLAGS = $(VTE_CFLAGS) $(AM_CXXFLAGS)
-vteconv_LDADD = $(VTE_LIBS)
 
 dumpkeys_SOURCES = dumpkeys.c
 dumpkeys_CPPFLAGS = -I$(builddir) -I$(srcdir) $(AM_CPPFLAGS)

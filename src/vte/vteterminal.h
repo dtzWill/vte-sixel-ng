@@ -379,11 +379,6 @@ char *vte_terminal_get_text(VteTerminal *terminal,
 			    gpointer user_data,
 			    GArray *attributes) _VTE_GNUC_NONNULL(1) G_GNUC_MALLOC;
 _VTE_PUBLIC
-char *vte_terminal_get_text_include_trailing_spaces(VteTerminal *terminal,
-						    VteSelectionFunc is_selected,
-						    gpointer user_data,
-						    GArray *attributes) _VTE_GNUC_NONNULL(1) G_GNUC_MALLOC;
-_VTE_PUBLIC
 char *vte_terminal_get_text_range(VteTerminal *terminal,
 				  glong start_row, glong start_col,
 				  glong end_row, glong end_col,
@@ -453,14 +448,6 @@ _VTE_PUBLIC
 gboolean  vte_terminal_search_find_next       (VteTerminal *terminal) _VTE_GNUC_NONNULL(1);
 
 
-/* Set the character encoding.  Most of the time you won't need this. */
-_VTE_PUBLIC
-gboolean vte_terminal_set_encoding(VteTerminal *terminal,
-                                   const char *codeset,
-                                   GError **error) _VTE_GNUC_NONNULL(1);
-_VTE_PUBLIC
-const char *vte_terminal_get_encoding(VteTerminal *terminal) _VTE_GNUC_NONNULL(1);
-
 /* CJK compatibility setting */
 _VTE_PUBLIC
 void vte_terminal_set_cjk_ambiguous_width(VteTerminal *terminal,
@@ -501,6 +488,9 @@ gboolean vte_terminal_get_input_enabled (VteTerminal *terminal) _VTE_GNUC_NONNUL
 _VTE_PUBLIC
 void vte_terminal_set_clear_background(VteTerminal* terminal,
                                        gboolean setting) _VTE_GNUC_NONNULL(1);
+_VTE_PUBLIC
+void vte_terminal_get_color_background_for_draw(VteTerminal* terminal,
+                                                GdkRGBA* color) _VTE_GNUC_NONNULL(1) _VTE_GNUC_NONNULL(2);
 
 /* Writing contents out */
 _VTE_PUBLIC
