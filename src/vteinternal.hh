@@ -22,6 +22,7 @@
 
 #include "vtedefines.hh"
 #include "vtetypes.hh"
+#include "vtedraw.hh"
 #include "ring.hh"
 #include "vteconv.h"
 #include "buffer.h"
