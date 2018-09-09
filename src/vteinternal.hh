@@ -22,7 +22,6 @@
 
 #include "vtedefines.hh"
 #include "vtetypes.hh"
-#include "reaper.hh"
 #include "ring.hh"
 #include "vteconv.h"
 #include "buffer.h"
