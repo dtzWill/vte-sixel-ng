@@ -8282,6 +8282,10 @@ Terminal::~Terminal()
 		g_iconv_close(m_outgoing_conv);
 	}
 
+	_vte_byte_array_free(m_conv_buffer);
+        _vte_byte_array_free(m_incoming_leftover);
+#endif
+
 	/* Start listening for child-exited signals and ignore them, so that no zombie child is left behind. */
         if (m_child_watch_source != 0) {
                 g_source_remove (m_child_watch_source);
