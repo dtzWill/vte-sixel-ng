@@ -1965,6 +1965,8 @@ Terminal::set_encoding(char const* codeset)
                         g_iconv_close(m_incoming_conv);
                 if (m_outgoing_conv != ((GIConv)-1))
                         g_iconv_close(m_outgoing_conv);
+                m_incoming_conv = (GIConv)-1;
+                m_outgoing_conv = (GIConv)-1;
         } else {
                 auto outconv = g_iconv_open(codeset, "UTF-8");
                 if (outconv == ((GIConv)-1))
@@ -5522,7 +5524,8 @@ Terminal::hyperlink_hilite_update()
 
         /* Underlining hyperlinks has precedence over regex matches. So when the hovered hyperlink changes,
          * the regex match might need to become or stop being underlined. */
-        invalidate_match_span();
+        if (m_match != nullptr)
+                invalidate_match_span();
 
         apply_mouse_cursor();
 

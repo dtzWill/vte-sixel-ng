@@ -5,8 +5,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version: vte 0\n"
 "Report-Msgid-Bugs-To: https://gitlab.gnome.org/GNOME/vte/issues\n"
-"POT-Creation-Date: 2018-06-20 20:20+0000\n"
-"PO-Revision-Date: 2018-09-02 19:00+0200\n"
+"POT-Creation-Date: 2018-09-02 17:55+0000\n"
+"PO-Revision-Date: 2018-09-02 20:28+0200\n"
 "Last-Translator: gogo <trebelnik2@gmail.com>\n"
 "Language-Team: Croatian <lokalizacija@linux.hr>\n"
 "Language: hr\n"
@@ -17,25 +17,25 @@ msgstr ""
 "X-Generator: Poedit 2.1.1\n"
 
 #. Translators: %s is replaced with error message returned by strerror().
-#: ../src/vte.cc:3966
+#: ../src/vte.cc:3989
 #, c-format
 msgid "Error reading from child: %s."
 msgstr "Greška prilikom čitanja nadređenog: %s."
 
-#: ../src/vte.cc:4122
+#: ../src/vte.cc:4139
 #, c-format
 msgid "Error (%s) converting data for child, dropping."
 msgstr "Greška (%s) pri pretvorbi podataka za nadređenog, odbacujem."
 
-#: ../src/vte.cc:8179
+#: ../src/vte.cc:8131
 msgid "WARNING"
 msgstr "UPOZORENJE"
 
-#: ../src/vte.cc:8180
+#: ../src/vte.cc:8132
 msgid "GnuTLS not enabled; data will be written to disk unencrypted!"
-msgstr "GNUTLS nije omogućen; podaci će biti zapisivani nešifrirano na disk!"
+msgstr "GnuTLS nije omogućen; podaci će biti zapisivani nešifrirano na disk!"
 
-#: ../src/vtegtk.cc:3618
+#: ../src/vtegtk.cc:3664
 #, c-format
 msgid "Unable to convert characters from %s to %s."
 msgstr "Nemoguća pretvorba znakova iz %s u %s."
