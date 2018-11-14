@@ -61,8 +61,9 @@ _VTE_CMD(DECSC) /* save cursor */
 _VTE_CMD(DECSCUSR) /* set cursor style */
 _VTE_CMD(DECSED) /* selective erase in display */
 _VTE_CMD(DECSEL) /* selective erase in line */
+_VTE_CMD(DECSGR) /* DEC select graphics rendition */
 _VTE_CMD(DECSLPP) /* set lines per page */
-_VTE_CMD(DECSLRM) /* set left and right margins */
+_VTE_CMD(DECSLRM_OR_SCOSC) /* set left and right margins or SCO save cursor */
 _VTE_CMD(DECSR) /* secure reset */
 _VTE_CMD(DECST8C) /* set tab at every 8 columns */
 _VTE_CMD(DECSTBM) /* set top and bottom margins */
@@ -101,6 +102,8 @@ _VTE_CMD(RI) /* reverse index */
 _VTE_CMD(RIS) /* reset to initial state */
 _VTE_CMD(RM_DEC) /* reset mode dec */
 _VTE_CMD(RM_ECMA) /* reset mode ecma */
+_VTE_CMD(SCORC) /* SCO restore cursor */
+_VTE_CMD(SCOSC) /* SCO save cursor */
 _VTE_CMD(SD) /* scroll down */
 _VTE_CMD(SD_OR_XTERM_IHMT) /* scroll down or xterm initiate highlight mouse tracking */
 _VTE_CMD(SGR) /* select graphics rendition */
@@ -199,6 +202,7 @@ _VTE_NOP(DECSIXEL) /* SIXEL graphics */
 _VTE_NOP(DECSKCV) /* set key click volume */
 _VTE_NOP(DECSLCK) /* set lock key style */
 _VTE_NOP(DECSLE) /* select locator events */
+_VTE_NOP(DECSLRM) /* set left and right margins */
 _VTE_NOP(DECSMBV) /* set margin bell volume */
 _VTE_NOP(DECSMKR) /* select modifier key reporting */
 _VTE_NOP(DECSNLS) /* set lines per screen */
@@ -271,7 +275,6 @@ _VTE_NOP(QUAD) /* quad */
 _VTE_NOP(RLOGIN_MML) /* RLogin music macro language */
 _VTE_NOP(SACS) /* set additional character separation */
 _VTE_NOP(SAPV) /* select alternative presentation variants */
-_VTE_NOP(SCORC) /* SCO restore cursor */
 _VTE_NOP(SCO) /* select character orientation */
 _VTE_NOP(SCP) /* select character path */
 _VTE_NOP(SCS) /* set character spacing */
@@ -315,6 +318,7 @@ _VTE_NOP(WYDHL_TH) /* single width double height line: top half */
 _VTE_NOP(WYLSFNT) /* load soft font */
 _VTE_NOP(WYSCRATE) /* set smooth scroll rate */
 _VTE_NOP(XDGSYNC) /* synchronous update */
+_VTE_NOP(XTERM_CHECKSUM_MODE) /* xterm DECRQCRA checksum mode */
 _VTE_NOP(XTERM_IHMT) /* xterm initiate highlight mouse tracking */
 _VTE_NOP(XTERM_MLHP) /* xterm memory lock hp bugfix */
 _VTE_NOP(XTERM_MUHP) /* xterm memory unlock hp bugfix */

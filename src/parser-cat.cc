@@ -1,5 +1,4 @@
 /*
- * Copyright (C) 2001,2002,2003 Red Hat, Inc.
  * Copyright © 2017, 2018 Christian Persch
  *
  * This programme is free software; you can redistribute it and/or
@@ -29,12 +28,32 @@
 #include <cstdio>
 #include <cstdlib>
 
+#include <string>
+
 #include "debug.h"
 #include "parser.hh"
+#include "parser-glue.hh"
 #include "utf8.hh"
 
-static char const*
-seq_to_str(unsigned int type)
+enum {
+#define _VTE_SGR(...)
+#define _VTE_NGR(name, value) VTE_SGR_##name = value,
+#include "parser-sgr.hh"
+#undef _VTE_SGR
+#undef _VTE_NGR
+};
+
+using namespace std::literals;
+
+char*
+vte::parser::Sequence::ucs4_to_utf8(gunichar const* str,
+                                    ssize_t len) const noexcept
+{
+        return g_ucs4_to_utf8(str, len, nullptr, nullptr, nullptr);
+}
+
+static constexpr char const*
+seq_to_str(unsigned int type) noexcept
 {
         switch (type) {
         case VTE_SEQ_NONE: return "NONE";
@@ -54,8 +73,8 @@ seq_to_str(unsigned int type)
         }
 }
 
-static char const*
-cmd_to_str(unsigned int command)
+static constexpr char const*
+cmd_to_str(unsigned int command) noexcept
 {
         switch (command) {
 #define _VTE_CMD(cmd) case VTE_CMD_##cmd: return #cmd;
@@ -69,8 +88,8 @@ cmd_to_str(unsigned int command)
 }
 
 #if 0
-static char const*
-charset_alias_to_str(unsigned int cs)
+static constexepr char const*
+charset_alias_to_str(unsigned int cs) noexcept
 {
         switch (cs) {
 #define _VTE_CHARSET_PASTE(name)
@@ -87,8 +106,8 @@ charset_alias_to_str(unsigned int cs)
         }
 }
 
-static char const*
-charset_to_str(unsigned int cs)
+static constexpr char const*
+charset_to_str(unsigned int cs) noexcept
 {
         auto alias = charset_alias_to_str(cs);
         if (alias)
@@ -112,411 +131,654 @@ charset_to_str(unsigned int cs)
 }
 #endif
 
-#define SEQ_START "\e[7m"
-#define SEQ_END   "\e[27m"
-
-#define SEQ_START_RED "\e[7;31m"
-#define SEQ_END_RED   "\e[27;39m"
-
-class printer {
-public:
-        printer(GString* str,
-                bool plain,
-                char const* intro,
-                char const* outro)
-                : m_str(str),
-                  m_plain(plain),
-                  m_outro(outro) {
-                if (!m_plain)
-                        g_string_append(m_str, intro);
-        }
-        ~printer() {
-                if (!m_plain)
-                        g_string_append(m_str, m_outro);
-        }
+class PrettyPrinter {
 private:
-        GString* m_str;
+        std::string m_str;
         bool m_plain;
-        char const* m_outro;
-};
+        bool m_codepoints;
 
-static void
-print_params(GString* str,
-             struct vte_seq const* seq)
-{
-        if (seq->n_args > 0)
-                g_string_append_c(str, ' ');
+        inline constexpr bool plain() const noexcept { return m_plain; }
 
-        for (unsigned int i = 0; i < seq->n_args; i++) {
-                auto arg = seq->args[i];
-                if (!vte_seq_arg_default(arg))
-                        g_string_append_printf(str, "%d", vte_seq_arg_value(arg));
-                if (i + 1 < seq->n_args)
-                        g_string_append_c(str, vte_seq_arg_nonfinal(arg) ? ':' : ';');
-        }
-}
+        class Attribute {
+        public:
+                Attribute(PrettyPrinter* printer,
+                          std::string const& intro,
+                          std::string const& outro) noexcept
+                        : m_printer{printer}
+                        , m_outro{outro} {
+                        if (!m_printer->plain())
+                                m_printer->m_str.append(intro);
+                        }
 
-static void
-print_pintro(GString* str,
-             unsigned int type,
-             unsigned int intermediates)
-{
-        if (type != VTE_SEQ_CSI &&
-            type != VTE_SEQ_DCS)
-                return;
+                ~Attribute() noexcept
+                {
+                        if (!m_printer->plain())
+                                m_printer->m_str.append(m_outro);
+                }
 
-        unsigned int p = intermediates & 0x7;
-        if (p == 0)
-                return;
+        private:
+                PrettyPrinter* m_printer;
+                std::string m_outro;
+        }; // class Attribute
 
-        g_string_append_c(str, ' ');
-        g_string_append_c(str, 0x40 - p);
-}
+        class ReverseAttr : private Attribute {
+        public:
+                ReverseAttr(PrettyPrinter* printer)
+                        : Attribute(printer, "\e[7m"s, "\e[27m"s)
+                { }
+        };
 
-static void
-print_intermediates(GString* str,
-                    unsigned int type,
-                    unsigned int intermediates)
-{
-        if (type == VTE_SEQ_CSI ||
-            type == VTE_SEQ_DCS)
-                intermediates = intermediates >> 3; /* remove pintro */
+        class RedAttr : private Attribute {
+        public:
+                RedAttr(PrettyPrinter* printer)
+                        : Attribute(printer, "\e[7;31m"s, "\e[27;39m"s)
+                { }
+        };
 
-        while (intermediates != 0) {
-                unsigned int i = intermediates & 0x1f;
-                char c = 0x20 + i - 1;
+        void
+        print_params(vte::parser::Sequence const& seq) noexcept
+        {
+                auto const size = seq.size();
+                if (size > 0)
+                        m_str.push_back(' ');
 
-                g_string_append_c(str, ' ');
-                if (c == 0x20)
-                        g_string_append(str, "SP");
-                else
-                        g_string_append_c(str, c);
-
-                intermediates = intermediates >> 5;
-        }
-}
-
-static void
-print_string(GString* str,
-             struct vte_seq const* seq)
-{
-        size_t len;
-        auto buf = vte_seq_string_get(&seq->arg_str, &len);
-
-        g_string_append_c(str, '\"');
-        for (size_t i = 0; i < len; ++i)
-                g_string_append_unichar(str, buf[i]);
-        g_string_append_c(str, '\"');
-}
-
-static void
-print_seq_and_params(GString* str,
-                     const struct vte_seq *seq,
-                     bool plain)
-{
-        printer p(str, plain, SEQ_START, SEQ_END);
-
-        if (seq->command != VTE_CMD_NONE) {
-                g_string_append_printf(str, "{%s", cmd_to_str(seq->command));
-                print_params(str, seq);
-                g_string_append_c(str, '}');
-        } else {
-                g_string_append_printf(str, "{%s", seq_to_str(seq->type));
-                print_pintro(str, seq->type, seq->intermediates);
-                print_params(str, seq);
-                print_intermediates(str, seq->type, seq->intermediates);
-                g_string_append_printf(str, " %c}", seq->terminator);
-        }
-}
-
-static void
-print_seq(GString* str,
-          struct vte_seq const* seq,
-          bool codepoints,
-          bool plain)
-{
-        switch (seq->type) {
-        case VTE_SEQ_NONE: {
-                printer p(str, plain, SEQ_START_RED, SEQ_END_RED);
-                g_string_append(str, "{NONE}");
-                break;
+                for (unsigned int i = 0; i < size; i++) {
+                        if (!seq.param_default(i))
+                                print_format("%d", seq.param(i));
+                        if (i + 1 < size)
+                                m_str.push_back(seq.param_nonfinal(i) ? ':' : ';');
+                }
         }
 
-        case VTE_SEQ_IGNORE: {
-                printer p(str, plain, SEQ_START_RED, SEQ_END_RED);
-                g_string_append(str, "{IGN}");
-                break;
+        void
+        print_pintro(vte::parser::Sequence const& seq) noexcept
+        {
+                auto const type = seq.type();
+                if (type != VTE_SEQ_CSI &&
+                    type != VTE_SEQ_DCS)
+                        return;
+
+                auto const p = seq.intermediates() & 0x7;
+                if (p == 0)
+                        return;
+
+                m_str.push_back(' ');
+                m_str.push_back(char(0x40 - p));
         }
 
-        case VTE_SEQ_GRAPHIC: {
-                bool printable = g_unichar_isprint(seq->terminator);
-                if (codepoints || !printable) {
-                        if (printable) {
-                                char ubuf[7];
-                                ubuf[g_unichar_to_utf8(seq->terminator, ubuf)] = 0;
-                                g_string_append_printf(str, "[%04X %s]",
-                                                       seq->terminator, ubuf);
+        void
+        print_intermediates(vte::parser::Sequence const& seq) noexcept
+        {
+                auto const type = seq.type();
+                auto intermediates = seq.intermediates();
+                if (type == VTE_SEQ_CSI ||
+                    type == VTE_SEQ_DCS)
+                        intermediates = intermediates >> 3; /* remove pintro */
+
+                while (intermediates != 0) {
+                        unsigned int i = intermediates & 0x1f;
+                        char c = 0x20 + i - 1;
+
+                        m_str.push_back(' ');
+                        if (c == 0x20)
+                                m_str.append("SP"s);
+                        else
+                                m_str.push_back(c);
+
+                        intermediates = intermediates >> 5;
+                }
+        }
+
+        void
+        print_unichar(uint32_t c) noexcept
+        {
+                char buf[7];
+                auto len = g_unichar_to_utf8(c, buf);
+                m_str.append(buf, len);
+        }
+
+        G_GNUC_PRINTF(2, 3)
+        void
+        print_format(char const* format,
+                     ...)
+        {
+                char buf[256];
+                va_list args;
+                va_start(args, format);
+                auto len = g_vsnprintf(buf, sizeof(buf), format, args);
+                va_end(args);
+
+                m_str.append(buf, len);
+        }
+
+        void
+        print_string(vte::parser::Sequence const& seq) noexcept
+        {
+                auto u8str = seq.string_param();
+
+                m_str.push_back('\"');
+                m_str.append(u8str);
+                m_str.push_back('\"');
+
+                g_free(u8str);
+        }
+
+        void
+        print_seq_and_params(vte::parser::Sequence const& seq) noexcept
+        {
+                ReverseAttr attr(this);
+
+                if (seq.command() != VTE_CMD_NONE) {
+                        m_str.push_back('{');
+                        m_str.append(cmd_to_str(seq.command()));
+                        print_params(seq);
+                        m_str.push_back('}');
+                } else {
+                        m_str.push_back('{');
+                        m_str.append(seq_to_str(seq.type()));
+                        print_pintro(seq);
+                        print_params(seq);
+                        print_intermediates(seq);
+                        m_str.push_back(' ');
+                        m_str.push_back(seq.terminator());
+                        m_str.push_back('}');
+                }
+        }
+
+        void
+        print_seq(vte::parser::Sequence const& seq) noexcept
+        {
+                switch (seq.type()) {
+                case VTE_SEQ_NONE: {
+                        RedAttr attr(this);
+                        m_str.append("{NONE}"s);
+                        break;
+                }
+
+                case VTE_SEQ_IGNORE: {
+                        RedAttr attr(this);
+                        m_str.append("{IGNORE}"s);
+                        break;
+                }
+
+                case VTE_SEQ_GRAPHIC: {
+                        auto const terminator = seq.terminator();
+                        bool const printable = g_unichar_isprint(terminator);
+                        if (m_codepoints || !printable) {
+                                if (printable) {
+                                        char ubuf[7];
+                                        ubuf[g_unichar_to_utf8(terminator, ubuf)] = 0;
+                                        print_format("[%04X %s]", terminator, ubuf);
+                                } else {
+                                        print_format("[%04X]", terminator);
+                                }
                         } else {
-                                g_string_append_printf(str, "[%04X]",
-                                                       seq->terminator);
+                                print_unichar(terminator);
+                        }
+                        break;
+                }
+
+                case VTE_SEQ_CONTROL:
+                case VTE_SEQ_ESCAPE: {
+                        ReverseAttr attr(this);
+                        print_format("{%s}", cmd_to_str(seq.command()));
+                        break;
+                }
+
+                case VTE_SEQ_CSI:
+                case VTE_SEQ_DCS: {
+                        print_seq_and_params(seq);
+                        break;
+                }
+
+                case VTE_SEQ_OSC: {
+                        ReverseAttr attr(this);
+                        m_str.append("{OSC "s);
+                        print_string(seq);
+                        m_str.push_back('}');
+                        break;
+                }
+
+                case VTE_SEQ_SCI: {
+                        auto const terminator = seq.terminator();
+                        if (terminator <= 0x20)
+                                print_format("{SCI %d/%d}",
+                                             terminator / 16,
+                                             terminator % 16);
+                        else
+                                print_format("{SCI %c}", terminator);
+                        break;
+                }
+
+                default:
+                        assert(false);
+                }
+        }
+
+        void
+        printout() noexcept
+        {
+                g_print("%s\n", m_str.c_str());
+                m_str.clear();
+        }
+
+public:
+
+        PrettyPrinter(bool plain,
+                      bool codepoints) noexcept
+                : m_plain{plain}
+                , m_codepoints{codepoints}
+        {
+        }
+
+        ~PrettyPrinter() noexcept
+        {
+                printout();
+        }
+
+        void operator()(vte::parser::Sequence const& seq) noexcept
+        {
+                print_seq(seq);
+                if (seq.command() == VTE_CMD_LF)
+                        printout();
+        }
+
+}; // class PrettyPrinter
+
+class Linter {
+private:
+        G_GNUC_PRINTF(2, 3)
+        void
+        warn(char const* format,
+             ...) const noexcept
+        {
+                va_list args;
+                va_start(args, format);
+                char* str = g_strdup_vprintf(format, args);
+                va_end(args);
+                g_printerr("WARNING: %s\n", str);
+                g_free(str);
+        }
+
+        void
+        warn_deprecated(int cmd,
+                        int replacement_cmd) const noexcept
+        {
+                warn("%s is deprecated; use %s instead",
+                     cmd_to_str(cmd),
+                     cmd_to_str(replacement_cmd));
+        }
+
+        void
+        check_sgr_number(int sgr) noexcept
+        {
+                switch (sgr) {
+                case -1:
+#define _VTE_SGR(name, value) case value:
+#define _VTE_NGR(...)
+#include "parser-sgr.hh"
+#undef _VTE_SGR
+#undef _VTE_NGR
+                case VTE_SGR_SET_FORE_LEGACY_START+1 ... VTE_SGR_SET_FORE_LEGACY_END-1:
+                case VTE_SGR_SET_FORE_LEGACY_BRIGHT_START+1 ... VTE_SGR_SET_FORE_LEGACY_BRIGHT_END-1:
+                case VTE_SGR_SET_BACK_LEGACY_START+1 ... VTE_SGR_SET_BACK_LEGACY_END-1:
+                case VTE_SGR_SET_BACK_LEGACY_BRIGHT_START+1 ... VTE_SGR_SET_BACK_LEGACY_BRIGHT_END-1:
+                        break;
+
+#define _VTE_SGR(...)
+#define _VTE_NGR(name, value) case value:
+#include "parser-sgr.hh"
+#undef _VTE_SGR
+#undef _VTE_NGR
+                case VTE_SGR_SET_FONT_FIRST+1 ... VTE_SGR_SET_FONT_LAST-1:
+                        warn("SGR %d is unsupported", sgr);
+                        break;
+
+                default:
+                        warn("SGR %d is unknown", sgr);
+                        break;
+
+                }
+        }
+
+        void
+        check_sgr_color(vte::parser::Sequence const& seq,
+                        unsigned int& idx) noexcept
+        {
+                auto const sgr = seq.param(idx);
+
+                /* Simplified and adapted from Terminal::seq_parse_sgr_color() */
+                if (seq.param_nonfinal(idx)) {
+                        /* Colon version */
+                        auto const param = seq.param(++idx);
+                        switch (param) {
+                        case 2: {
+                                auto const n = seq.next(idx) - idx;
+                                if (n < 4)
+                                        warn("SGR %d:2 not enough parameters", sgr);
+                                else if (n == 4)
+                                        warn("SGR %d:2:r:g:b is deprecated; use SGR %d:2::r:g:b instead",
+                                             sgr, sgr);
+                                break;
+                        }
+                        case 5: {
+                                auto const n = seq.next(idx) - idx;
+                                if (n < 2)
+                                        warn("SGR %d:5 not enough parameters", sgr);
+                                break;
+                        }
+                        case -1:
+                                warn("SGR %d does not admit default parameters", sgr);
+                                break;
+                        case 0:
+                        case 1:
+                        case 3:
+                        case 4:
+                                warn("SGR %d:%d is unsupported", sgr, param);
+                                break;
+                        default:
+                                warn("SGR %d:%d is unknown", sgr, param);
                         }
                 } else {
-                        g_string_append_unichar(str, seq->terminator);
-                }
-                break;
-        }
-
-        case VTE_SEQ_CONTROL:
-        case VTE_SEQ_ESCAPE: {
-                printer p(str, plain, SEQ_START, SEQ_END);
-                g_string_append_printf(str, "{%s}", cmd_to_str(seq->command));
-                break;
-        }
-
-        case VTE_SEQ_CSI:
-        case VTE_SEQ_DCS: {
-                print_seq_and_params(str, seq, plain);
-                break;
-        }
-
-        case VTE_SEQ_OSC: {
-                printer p(str, plain, SEQ_START, SEQ_END);
-                g_string_append(str, "{OSC ");
-                print_string(str, seq);
-                g_string_append_c(str, '}');
-                break;
-        }
-
-        case VTE_SEQ_SCI: {
-                if (seq->terminator <= 0x20)
-                  g_string_append_printf(str, "{SCI %d/%d}",
-                                         seq->terminator / 16,
-                                         seq->terminator % 16);
-                else
-                  g_string_append_printf(str, "{SCI %c}", seq->terminator);
-                break;
-        }
-
-        default:
-                assert(false);
-        }
-}
-
-static void
-printout(GString* str)
-{
-        g_print("%s\n", str->str);
-        g_string_truncate(str, 0);
-}
-
-static gsize seq_stats[VTE_SEQ_N];
-static gsize cmd_stats[VTE_CMD_N];
-static GArray* bench_times;
-
-static void
-process_file_utf8(int fd,
-                  bool codepoints,
-                  bool plain,
-                  bool quiet)
-{
-        struct vte_parser parser;
-        vte_parser_init(&parser);
-
-        gsize const buf_size = 16384;
-        guchar* buf = g_new0(guchar, buf_size);
-        auto outbuf = g_string_sized_new(buf_size);
-
-        auto start_time = g_get_monotonic_time();
-
-        vte::base::UTF8Decoder decoder;
-
-        gsize buf_start = 0;
-        for (;;) {
-                auto len = read(fd, buf + buf_start, buf_size - buf_start);
-                if (!len)
-                        break;
-                if (len == -1) {
-                        if (errno == EAGAIN)
-                                continue;
-                        break;
-                }
-
-                auto const bufend = buf + len;
-
-                struct vte_seq *seq = &parser.seq;
-
-                for (auto sptr = buf; sptr < bufend; ++sptr) {
-                        switch (decoder.decode(*sptr)) {
-                        case vte::base::UTF8Decoder::REJECT_REWIND:
-                                /* Rewind the stream.
-                                 * Note that this will never lead to a loop, since in the
-                                 * next round this byte *will* be consumed.
-                                 */
-                                --sptr;
-                                /* [[fallthrough]]; */
-                        case vte::base::UTF8Decoder::REJECT:
-                                decoder.reset();
-                                /* Fall through to insert the U+FFFD replacement character. */
-                                /* [[fallthrough]]; */
-                        case vte::base::UTF8Decoder::ACCEPT: {
-                                auto ret = vte_parser_feed(&parser, decoder.codepoint());
-                                if (G_UNLIKELY(ret < 0)) {
-                                        g_printerr("Parser error!\n");
-                                        goto out;
-                                }
-
-                                seq_stats[ret]++;
-                                if (ret != VTE_SEQ_NONE) {
-                                        cmd_stats[seq->command]++;
-                                        if (!quiet) {
-                                                print_seq(outbuf, seq, codepoints, plain);
-                                                if (seq->command == VTE_CMD_LF)
-                                                        printout(outbuf);
-                                        }
-                                }
+                        /* Semicolon version */
+                        idx = seq.next(idx);
+                        auto const param = seq.param(idx);
+                        switch (param) {
+                        case 2:
+                                /* Consume 3 more parameters */
+                                idx = seq.next(idx);
+                                idx = seq.next(idx);
+                                idx = seq.next(idx);
+                                warn("SGR %d;%d;r;g;b is deprecated; use SGR %d:%d::r:g:b instead",
+                                     sgr, param, sgr, param);
+                                break;
+                        case 5:
+                                /* Consume 1 more parameter */
+                                idx = seq.next(idx);
+                                warn("SGR %d;%d;index is deprecated; use SGR %d:%d:index instead",
+                                     sgr, param, sgr, param);
+                                break;
+                        case -1:
+                                warn("SGR %d does not admit default parameters", sgr);
+                                break;
+                        case 0:
+                        case 1:
+                        case 3:
+                        case 4:
+                                warn("SGR %d;%d;... is unsupported; use SGR %d:%d:... instead",
+                                     sgr, param, sgr, param);
+                                break;
+                        default:
+                                warn("SGR %d;%d is unknown", sgr, param);
                                 break;
                         }
+                }
+        }
+
+        void
+        check_sgr_underline(vte::parser::Sequence const& seq,
+                            unsigned int idx) noexcept
+        {
+                auto const sgr = seq.param(idx);
+
+                unsigned int param = 1;
+                /* If we have a subparameter, get it */
+                if (seq.param_nonfinal(idx))
+                        param = seq.param(idx + 1);
+
+                switch (param) {
+                case -1:
+                case 0:
+                case 1:
+                case 2:
+                case 3:
+                        break;
+                case 4:
+                case 5:
+                        warn("SGR %d:%d is unsupported", sgr, param);
+                        break;
+                default:
+                        warn("SGR %d:%d is unknown", sgr, param);
+                        break;
+                }
+        }
+
+        void
+        check_sgr(vte::parser::Sequence const& seq) noexcept
+        {
+                for (unsigned int i = 0; i < seq.size(); i = seq.next(i)) {
+                        auto const param = seq.param(i, 0);
+
+                        check_sgr_number(param);
+
+                        switch (param) {
+                        case VTE_SGR_SET_UNDERLINE:
+                                check_sgr_underline(seq, i);
+                                break;
+
+                        case VTE_SGR_SET_FORE_SPEC:
+                        case VTE_SGR_SET_BACK_SPEC:
+                        case VTE_SGR_SET_DECO_SPEC:
+                                check_sgr_color(seq, i);
+                                break;
 
                         default:
+                                if (seq.param_nonfinal(i))
+                                        warn("SGR %d does not admit subparameters", param);
                                 break;
                         }
                 }
         }
 
- out:
-        if (!quiet)
-                printout(outbuf);
+public:
+        constexpr Linter() noexcept = default;
+        ~Linter() noexcept = default;
 
-        int64_t time_spent = g_get_monotonic_time() - start_time;
-        g_array_append_val(bench_times, time_spent);
+        void operator()(vte::parser::Sequence const& seq) noexcept
+        {
+                auto cmd = seq.command();
+                switch (cmd) {
+                case VTE_CMD_OSC:
+                        if (seq.terminator() == 7 /* BEL */)
+                                warn("OSC terminated by BEL may be ignored; use ST (ESC \\) instead.");
+                        break;
 
-        g_string_free(outbuf, TRUE);
-        g_free(buf);
-        vte_parser_deinit(&parser);
-}
+                case VTE_CMD_DECSLRM_OR_SCOSC:
+                        cmd = VTE_CMD_SCOSC;
+                        [[fallthrough]];
+                case VTE_CMD_SCOSC:
+                        warn_deprecated(cmd, VTE_CMD_DECSC);
+                        break;
 
-static bool
-process_file(int fd,
-             bool codepoints,
-             bool plain,
-             bool quiet,
-             int repeat)
-{
-        if (fd == STDIN_FILENO && repeat != 1) {
-                g_printerr("Cannot consume STDIN more than once\n");
-                return false;
+                case VTE_CMD_SCORC:
+                        warn_deprecated(cmd, VTE_CMD_DECRC);
+                        break;
+
+                case VTE_CMD_SGR:
+                        check_sgr(seq);
+                        break;
+
+                default:
+                        if (cmd >= VTE_CMD_NOP_FIRST)
+                                warn("%s is unimplemented", cmd_to_str(cmd));
+                        break;
+                }
         }
 
-        for (auto i = 0; i < repeat; ++i) {
-                if (i > 0 && lseek(fd, 0, SEEK_SET) != 0) {
-                        g_printerr("Failed to seek: %m\n");
+}; // class Linter
+
+class Sink {
+public:
+        void operator()(vte::parser::Sequence const& seq) noexcept { }
+
+}; // class Sink
+
+class Processor {
+private:
+        gsize m_seq_stats[VTE_SEQ_N];
+        gsize m_cmd_stats[VTE_CMD_N];
+        GArray* m_bench_times;
+
+        template<class Functor>
+        void
+        process_file_utf8(int fd,
+                          Functor& func)
+        {
+                vte::parser::Parser parser{};
+                vte::parser::Sequence seq{parser};
+
+                gsize const buf_size = 16384;
+                guchar* buf = g_new0(guchar, buf_size);
+
+                auto start_time = g_get_monotonic_time();
+
+                vte::base::UTF8Decoder decoder;
+
+                gsize buf_start = 0;
+                for (;;) {
+                        auto len = read(fd, buf + buf_start, buf_size - buf_start);
+                        if (!len)
+                                break;
+                        if (len == -1) {
+                                if (errno == EAGAIN)
+                                        continue;
+                                break;
+                        }
+
+                        auto const bufend = buf + len;
+                        for (auto sptr = buf; sptr < bufend; ++sptr) {
+                                switch (decoder.decode(*sptr)) {
+                                case vte::base::UTF8Decoder::REJECT_REWIND:
+                                        /* Rewind the stream.
+                                         * Note that this will never lead to a loop, since in the
+                                         * next round this byte *will* be consumed.
+                                         */
+                                        --sptr;
+                                        [[fallthrough]];
+                                case vte::base::UTF8Decoder::REJECT:
+                                        decoder.reset();
+                                        /* Fall through to insert the U+FFFD replacement character. */
+                                        [[fallthrough]];
+                                case vte::base::UTF8Decoder::ACCEPT: {
+                                        auto ret = parser.feed(decoder.codepoint());
+                                        if (G_UNLIKELY(ret < 0)) {
+                                                g_printerr("Parser error!\n");
+                                                goto out;
+                                        }
+
+                                        m_seq_stats[ret]++;
+                                        if (ret != VTE_SEQ_NONE) {
+                                                m_cmd_stats[seq.command()]++;
+                                                func(seq);
+                                        }
+                                        break;
+                                }
+
+                                default:
+                                        break;
+                                }
+                        }
+                }
+
+        out:
+
+                int64_t time_spent = g_get_monotonic_time() - start_time;
+                g_array_append_val(m_bench_times, time_spent);
+
+                g_free(buf);
+        }
+
+        template<class Functor>
+        bool
+        process_file(int fd,
+                     int repeat,
+                     Functor& func)
+        {
+                if (fd == STDIN_FILENO && repeat != 1) {
+                        g_printerr("Cannot consume STDIN more than once\n");
                         return false;
                 }
 
-                process_file_utf8(fd, codepoints, plain, quiet);
-        }
-
-        return true;
-}
-
-int
-main(int argc,
-     char *argv[])
-{
-        gboolean benchmark = false;
-        gboolean codepoints = false;
-        gboolean plain = false;
-        gboolean quiet = false;
-        gboolean statistics = false;
-        int repeat = 1;
-        char** filenames = nullptr;
-        GOptionEntry const entries[] = {
-                { "benchmark", 'b', 0, G_OPTION_ARG_NONE, &benchmark,
-                  "Measure time spent parsing each file", nullptr },
-                { "codepoints", 'u', 0, G_OPTION_ARG_NONE, &codepoints,
-                  "Output unicode code points by number", nullptr },
-                { "plain", 'p', 0, G_OPTION_ARG_NONE, &plain,
-                  "Output plain text without attributes", nullptr },
-                { "quiet", 'q', 0, G_OPTION_ARG_NONE, &quiet,
-                  "Suppress output except for statistics and benchmark", nullptr },
-                { "repeat", 'r', 0, G_OPTION_ARG_INT, &repeat,
-                  "Repeat each file COUNT times", "COUNT" },
-                { "statistics", 's', 0, G_OPTION_ARG_NONE, &statistics,
-                  "Output statistics", nullptr },
-                { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, &filenames,
-                  nullptr, nullptr },
-                { nullptr }
-        };
-
-        setlocale(LC_ALL, "");
-        _vte_debug_init();
-
-        auto context = g_option_context_new("[FILE…] — parser cat");
-        g_option_context_set_help_enabled(context, true);
-        g_option_context_add_main_entries(context, entries, nullptr);
-
-        GError* err = nullptr;
-        bool rv = g_option_context_parse(context, &argc, &argv, &err);
-        g_option_context_free(context);
-
-        if (!rv) {
-                g_printerr("Failed to parse arguments: %s\n", err->message);
-                g_error_free(err);
-                return EXIT_FAILURE;
-        }
-
-        int exit_status = EXIT_FAILURE;
-
-        memset(&seq_stats, 0, sizeof(seq_stats));
-        memset(&cmd_stats, 0, sizeof(cmd_stats));
-        bench_times = g_array_new(false, true, sizeof(int64_t));
-
-        if (filenames != nullptr) {
-                for (auto i = 0; filenames[i] != nullptr; i++) {
-                        char const* filename = filenames[i];
-
-                        int fd = -1;
-                        if (g_str_equal(filename, "-")) {
-                                fd = STDIN_FILENO;
-                        } else {
-                                fd = open(filename, O_RDONLY);
-                                if (fd == -1) {
-                                        g_printerr("Error opening file %s: %m\n", filename);
-                                }
+                for (auto i = 0; i < repeat; ++i) {
+                        if (i > 0 && lseek(fd, 0, SEEK_SET) != 0) {
+                                g_printerr("Failed to seek: %m\n");
+                                return false;
                         }
-                        if (fd != -1) {
-                                bool r = process_file(fd, codepoints, plain, quiet, repeat);
-                                close(fd);
-                                if (!r)
-                                        break;
-                        }
+
+                        process_file_utf8(fd, func);
                 }
 
-                g_strfreev(filenames);
-                exit_status = EXIT_SUCCESS;
-        } else {
-                if (process_file(STDIN_FILENO, codepoints, plain, quiet, repeat))
-                        exit_status = EXIT_SUCCESS;
+                return true;
         }
 
-        if (statistics) {
+public:
+
+        Processor() noexcept
+        {
+                memset(&m_seq_stats, 0, sizeof(m_seq_stats));
+                memset(&m_cmd_stats, 0, sizeof(m_cmd_stats));
+                m_bench_times = g_array_new(false, true, sizeof(int64_t));
+        }
+
+        ~Processor() noexcept
+        {
+                g_array_free(m_bench_times, true);
+        }
+
+        template<class Functor>
+        bool
+        process_files(char const* const* filenames,
+                      int repeat,
+                      Functor& func)
+        {
+                bool r = true;
+                if (filenames != nullptr) {
+                        for (auto i = 0; filenames[i] != nullptr; i++) {
+                                char const* filename = filenames[i];
+
+                                int fd = -1;
+                                if (g_str_equal(filename, "-")) {
+                                        fd = STDIN_FILENO;
+                                } else {
+                                        fd = open(filename, O_RDONLY);
+                                        if (fd == -1) {
+                                                g_printerr("Error opening file %s: %m\n", filename);
+                                        }
+                                }
+                                if (fd != -1) {
+                                        r = process_file(fd, repeat, func);
+                                        close(fd);
+                                        if (!r)
+                                                break;
+                                }
+                        }
+                } else {
+                        r = process_file(STDIN_FILENO, repeat, func);
+                }
+
+                return r;
+        }
+
+        void print_statistics() const noexcept
+        {
                 for (unsigned int s = VTE_SEQ_NONE + 1; s < VTE_SEQ_N; s++) {
-                        g_printerr("%\'16" G_GSIZE_FORMAT " %s\n",  seq_stats[s], seq_to_str(s));
+                        g_printerr("%\'16" G_GSIZE_FORMAT " %s\n",  m_seq_stats[s], seq_to_str(s));
                 }
 
                 g_printerr("\n");
                 for (unsigned int s = 0; s < VTE_CMD_N; s++) {
-                        if (cmd_stats[s] > 0) {
+                        if (m_cmd_stats[s] > 0) {
                                 g_printerr("%\'16" G_GSIZE_FORMAT " %s%s\n",
-                                           cmd_stats[s],
+                                           m_cmd_stats[s],
                                            cmd_to_str(s),
                                            s >= VTE_CMD_NOP_FIRST ? " [NOP]" : "");
                         }
                 }
         }
 
-        if (benchmark) {
-                g_array_sort(bench_times,
+        void print_benchmark() const noexcept
+        {
+                g_array_sort(m_bench_times,
                              [](void const* p1, void const* p2) -> int {
                                      int64_t const t1 = *(int64_t const*)p1;
                                      int64_t const t2 = *(int64_t const*)p2;
@@ -524,21 +786,143 @@ main(int argc,
                              });
 
                 int64_t total_time = 0;
-                for (unsigned int i = 0; i < bench_times->len; ++i)
-                        total_time += g_array_index(bench_times, int64_t, i);
+                for (unsigned int i = 0; i < m_bench_times->len; ++i)
+                        total_time += g_array_index(m_bench_times, int64_t, i);
 
                 g_printerr("\nTimes: best %\'" G_GINT64_FORMAT "µs "
                            "worst %\'" G_GINT64_FORMAT "µs "
                            "average %\'" G_GINT64_FORMAT "µs\n",
-                           g_array_index(bench_times, int64_t, 0),
-                           g_array_index(bench_times, int64_t, bench_times->len - 1),
-                           total_time / (int64_t)bench_times->len);
-                for (unsigned int i = 0; i < bench_times->len; ++i)
+                           g_array_index(m_bench_times, int64_t, 0),
+                           g_array_index(m_bench_times, int64_t, m_bench_times->len - 1),
+                           total_time / (int64_t)m_bench_times->len);
+                for (unsigned int i = 0; i < m_bench_times->len; ++i)
                         g_printerr("  %\'" G_GINT64_FORMAT "µs\n",
-                                   g_array_index(bench_times, int64_t, i));
+                                   g_array_index(m_bench_times, int64_t, i));
         }
 
-        g_array_free(bench_times,true);
+}; // class Processor
 
-        return exit_status;
+class Options {
+private:
+        bool m_benchmark{false};
+        bool m_codepoints{false};
+        bool m_lint{false};
+        bool m_plain{false};
+        bool m_quiet{false};
+        bool m_statistics{false};
+        int m_repeat{1};
+        char** m_filenames{nullptr};
+
+        template<typename T1, typename T2 = T1>
+        class OptionArg {
+        private:
+                T1* m_return_ptr;
+                T2 m_value;
+        public:
+                OptionArg(T1* ptr, T2 v) : m_return_ptr{ptr}, m_value{v} { }
+                ~OptionArg() { *m_return_ptr = m_value; }
+
+                inline constexpr T2* ptr() noexcept { return &m_value; }
+        };
+
+        using BoolArg = OptionArg<bool, gboolean>;
+        using IntArg = OptionArg<int>;
+        using StrvArg = OptionArg<char**>;
+
+public:
+
+        Options() noexcept = default;
+        Options(Options const&) = delete;
+        Options(Options&&) = delete;
+
+        ~Options() {
+                if (m_filenames != nullptr)
+                        g_strfreev(m_filenames);
+        }
+
+        inline constexpr bool benchmark()  const noexcept { return m_benchmark;  }
+        inline constexpr bool codepoints() const noexcept { return m_codepoints; }
+        inline constexpr bool lint()       const noexcept { return m_lint;       }
+        inline constexpr bool plain()      const noexcept { return m_plain;      }
+        inline constexpr bool quiet()      const noexcept { return m_quiet;      }
+        inline constexpr bool statistics() const noexcept { return m_statistics; }
+        inline constexpr int  repeat()     const noexcept { return m_repeat;     }
+        inline constexpr char const* const* filenames() const noexcept { return m_filenames; }
+
+        bool parse(int argc,
+                   char* argv[],
+                   GError** error) noexcept
+        {
+                BoolArg benchmark{&m_benchmark, false};
+                BoolArg codepoints{&m_codepoints, false};
+                BoolArg lint{&m_lint, false};
+                BoolArg plain{&m_plain, false};
+                BoolArg quiet{&m_quiet, false};
+                BoolArg statistics{&m_statistics, false};
+                IntArg repeat{&m_repeat, 1};
+                StrvArg filenames{&m_filenames, nullptr};
+                GOptionEntry const entries[] = {
+                        { "benchmark", 'b', 0, G_OPTION_ARG_NONE, benchmark.ptr(),
+                          "Measure time spent parsing each file", nullptr },
+                        { "codepoints", 'u', 0, G_OPTION_ARG_NONE, codepoints.ptr(),
+                          "Output unicode code points by number", nullptr },
+                        { "lint", 'l', 0, G_OPTION_ARG_NONE, lint.ptr(),
+                          "Check input", nullptr },
+                        { "plain", 'p', 0, G_OPTION_ARG_NONE, plain.ptr(),
+                          "Output plain text without attributes", nullptr },
+                        { "quiet", 'q', 0, G_OPTION_ARG_NONE, quiet.ptr(),
+                          "Suppress output except for statistics and benchmark", nullptr },
+                        { "repeat", 'r', 0, G_OPTION_ARG_INT, repeat.ptr(),
+                          "Repeat each file COUNT times", "COUNT" },
+                        { "statistics", 's', 0, G_OPTION_ARG_NONE, statistics.ptr(),
+                          "Output statistics", nullptr },
+                        { G_OPTION_REMAINING, 0, 0, G_OPTION_ARG_FILENAME_ARRAY, filenames.ptr(),
+                          nullptr, nullptr },
+                        { nullptr },
+                };
+
+                auto context = g_option_context_new("[FILE…] — parser cat");
+                g_option_context_set_help_enabled(context, true);
+                g_option_context_add_main_entries(context, entries, nullptr);
+
+                bool rv = g_option_context_parse(context, &argc, &argv, error);
+                g_option_context_free(context);
+                return rv;
+        }
+}; // class Options
+
+int
+main(int argc,
+     char *argv[])
+{
+        setlocale(LC_ALL, "");
+        _vte_debug_init();
+
+        Options options{};
+        GError* err = nullptr;
+        if (!options.parse(argc, argv, &err)) {
+                g_printerr("Failed to parse arguments: %s\n", err->message);
+                g_error_free(err);
+                return EXIT_FAILURE;
+        }
+
+        bool rv;
+        Processor proc{};
+        if (options.lint()) {
+                Linter linter{};
+                rv = proc.process_files(options.filenames(), 1, linter);
+        } else if (options.quiet()) {
+                Sink sink{};
+                rv = proc.process_files(options.filenames(), options.repeat(), sink);
+        } else {
+                PrettyPrinter pp{options.plain(), options.codepoints()};
+                rv = proc.process_files(options.filenames(), options.repeat(), pp);
+        }
+
+        if (options.statistics())
+                proc.print_statistics();
+        if (options.benchmark())
+                proc.print_benchmark();
+
+        return rv ? EXIT_SUCCESS : EXIT_FAILURE;
 }

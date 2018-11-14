@@ -573,17 +573,23 @@ test_seq_esc_charset_other(void)
 {
         uint32_t i[4];
 
-        /* Other coding systems: ESC 2/5 F or ESC 2/5 2/15 F */
+        /* Other coding systems: ESC 2/5 F or ESC 2/5 I F */
         i[0] = 0x25;
         test_seq_esc_charset(i, 1,
-                             charset_ocs_with_return,
-                             G_N_ELEMENTS(charset_ocs_with_return),
-                             0x40, VTE_CMD_DOCS, VTE_CHARSET_NONE, 0);
+                             charset_ocs,
+                             G_N_ELEMENTS(charset_ocs),
+                             0x30, VTE_CMD_DOCS, VTE_CHARSET_NONE, 0);
+
+        i[1] = 0x20;
+        test_seq_esc_charset(i, 2,
+                             charset_ocs_with_2_0,
+                             G_N_ELEMENTS(charset_ocs_with_2_0),
+                             0x30, VTE_CMD_DOCS, VTE_CHARSET_NONE, 0);
 
         i[1] = 0x2f;
         test_seq_esc_charset(i, 2,
-                             charset_ocs_without_return,
-                             G_N_ELEMENTS(charset_ocs_without_return),
+                             charset_ocs_with_2_15,
+                             G_N_ELEMENTS(charset_ocs_with_2_15),
                              0x40, VTE_CMD_DOCS, VTE_CHARSET_NONE, 0);
 }
 
@@ -757,6 +763,29 @@ test_seq_sci(void)
                 test_seq_sci(f, true);
         for (uint32_t f = 0x7f; f <= 0xff; ++f)
                 test_seq_sci(f, false);
+}
+
+G_GNUC_UNUSED
+static void
+test_seq_sci_known(uint32_t f,
+                   unsigned int cmd)
+{
+        vte_seq_builder b{VTE_SEQ_SCI, f};
+
+        auto rv = feed_parser(b);
+        g_assert_cmpint(rv, ==, VTE_SEQ_SCI);
+        g_assert_cmpint(seq.command(), ==, cmd);
+}
+
+static void
+test_seq_sci_known(void)
+{
+        parser.reset();
+
+#define _VTE_SEQ(cmd,type,f,p,ni,i) \
+        test_seq_sci_known(f, VTE_CMD_##cmd);
+#include "parser-sci.hh"
+#undef _VTE_SEQ
 }
 
 static void
@@ -1476,6 +1505,7 @@ main(int argc,
         g_test_add_func("/vte/parser/sequences/csi/clear", test_seq_csi_clear);
         g_test_add_func("/vte/parser/sequences/csi/max", test_seq_csi_max);
         g_test_add_func("/vte/parser/sequences/sci", test_seq_sci);
+        g_test_add_func("/vte/parser/sequences/sci/known", test_seq_sci_known);
         g_test_add_func("/vte/parser/sequences/dcs", test_seq_dcs);
         g_test_add_func("/vte/parser/sequences/dcs/known", test_seq_dcs_known);
         g_test_add_func("/vte/parser/sequences/osc", test_seq_osc);

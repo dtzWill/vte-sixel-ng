@@ -81,42 +81,6 @@ enum {
 };
 
 enum {
-        VTE_SGR_SET_BOLD                     =   1,
-        VTE_SGR_SET_DIM                      =   2,
-        VTE_SGR_SET_ITALIC                   =   3,
-        VTE_SGR_SET_UNDERLINE                =   4,
-        VTE_SGR_SET_BLINK                    =   5,
-        VTE_SGR_SET_REVERSE                  =   7,
-        VTE_SGR_SET_INVISIBLE                =   8,
-        VTE_SGR_SET_STRIKETHROUGH            =   9,
-        VTE_SGR_SET_UNDERLINE_DOUBLE         =  21,
-        VTE_SGR_SET_FORE_LEGACY_START        =  30,
-        VTE_SGR_SET_FORE_LEGACY_END          =  37,
-        VTE_SGR_SET_FORE_SPEC                =  38,
-        VTE_SGR_SET_BACK_LEGACY_START        =  40,
-        VTE_SGR_SET_BACK_LEGACY_END          =  47,
-        VTE_SGR_SET_BACK_SPEC                =  48,
-        VTE_SGR_SET_OVERLINE                 =  53,
-        VTE_SGR_SET_DECO_SPEC                =  58,
-        VTE_SGR_SET_FORE_LEGACY_BRIGHT_START =  90,
-        VTE_SGR_SET_FORE_LEGACY_BRIGHT_END   =  97,
-        VTE_SGR_SET_BACK_LEGACY_BRIGHT_START = 100,
-        VTE_SGR_SET_BACK_LEGACY_BRIGHT_END   = 107,
-        VTE_SGR_RESET_ALL                    =   0,
-        VTE_SGR_RESET_BOLD_AND_DIM           =  22,
-        VTE_SGR_RESET_ITALIC                 =  23,
-        VTE_SGR_RESET_UNDERLINE              =  24,
-        VTE_SGR_RESET_BLINK                  =  25,
-        VTE_SGR_RESET_REVERSE                =  27,
-        VTE_SGR_RESET_INVISIBLE              =  28,
-        VTE_SGR_RESET_STRIKETHROUGH          =  29,
-        VTE_SGR_RESET_FORE                   =  39,
-        VTE_SGR_RESET_BACK                   =  49,
-        VTE_SGR_RESET_OVERLINE               =  55,
-        VTE_SGR_RESET_DECO                   =  59,
-};
-
-enum {
         VTE_SGR_COLOR_SPEC_RGB    = 2,
         VTE_SGR_COLOR_SPEC_LEGACY = 5
 };
@@ -424,22 +388,19 @@ public:
         std::u32string m_word_char_exceptions;
 
 	/* Selection information. */
-        gboolean m_has_selection;
         gboolean m_selecting;
-        gboolean m_selecting_after_threshold;
-        gboolean m_selecting_restart;
+        gboolean m_will_select_after_threshold;
         gboolean m_selecting_had_delta;
-        gboolean m_selection_block_mode;
+        gboolean m_selection_block_mode;  // FIXMEegmont move it into a 4th value in vte_selection_type?
         enum vte_selection_type m_selection_type;
-        vte::view::coords m_selection_origin, m_selection_last;
-        VteVisualPosition m_selection_start, m_selection_end;
+        vte::grid::halfcoords m_selection_origin, m_selection_last;
+        vte::grid::span m_selection_resolved;
 
 	/* Clipboard data information. */
-        // FIXMEchpe check if this can make m_has_selection obsolete!
         bool m_selection_owned[LAST_VTE_SELECTION];
         VteFormat m_selection_format[LAST_VTE_SELECTION];
         bool m_changing_selection;
-        GString *m_selection[LAST_VTE_SELECTION];
+        GString *m_selection[LAST_VTE_SELECTION];  // FIXMEegmont rename this so that m_selection_resolved can become m_selection?
         GtkClipboard *m_clipboard[LAST_VTE_SELECTION];
 
         ClipboardTextRequestGtk<Terminal> m_paste_request;
@@ -672,15 +633,12 @@ public:
                          bool insert,
                          bool invalidate_now);
 
-        void invalidate(vte::grid::span const& s, bool block = false);
+        void invalidate_row(vte::grid::row_t row);
+        void invalidate_rows(vte::grid::row_t row_start,
+                             vte::grid::row_t row_end /* inclusive */);
+        void invalidate(vte::grid::span const& s);
+        void invalidate_symmetrical_difference(vte::grid::span const& a, vte::grid::span const& b, bool block);
         void invalidate_match_span();
-        void invalidate_cell(vte::grid::column_t column, vte::grid::row_t row);
-        void invalidate_cells(vte::grid::column_t sc, int cc,
-                              vte::grid::row_t sr, int rc);
-        void invalidate_region(vte::grid::column_t sc, vte::grid::column_t ec,
-                               vte::grid::row_t sr, vte::grid::row_t er,
-                               bool block = false);
-        void invalidate_selection();
         void invalidate_all();
 
         void reset_update_rects();
@@ -730,6 +688,7 @@ public:
         vte::view::coords view_coords_from_grid_coords(vte::grid::coords const& rowcol) const;
         vte::grid::coords grid_coords_from_view_coords(vte::view::coords const& pos) const;
 
+        vte::grid::halfcoords selection_grid_halfcoords_from_view_coords(vte::view::coords const& pos) const;
         bool view_coords_visible(vte::view::coords const& pos) const;
         bool grid_coords_visible(vte::grid::coords const& rowcol) const;
 
@@ -813,9 +772,6 @@ public:
         void draw_rows(VteScreen *screen,
                        vte::grid::row_t start_row,
                        long row_count,
-                       vte::grid::column_t start_column,
-                       long column_count,
-                       gint start_x,
                        gint start_y,
                        gint column_width,
                        gint row_height);
@@ -823,10 +779,6 @@ public:
         bool autoscroll();
         void start_autoscroll();
         void stop_autoscroll();
-
-        void scroll_region (long row,
-                            long count,
-                            long delta);
 
         void connect_pty_read();
         void disconnect_pty_read();
@@ -955,20 +907,17 @@ public:
         GString* attributes_to_html(GString* text_string,
                                     GArray* attrs);
 
-        void start_selection(long x,
-                             long y,
-                             enum vte_selection_type selection_type);
+        void start_selection(vte::view::coords const& pos,
+                             enum vte_selection_type type);
         bool maybe_end_selection();
-
-        void extend_selection_expand();
-        void extend_selection(long x,
-                              long y,
-                              bool always_grow,
-                              bool force);
 
         void select_all();
         void deselect_all();
 
+        vte::grid::coords resolve_selection_endpoint(vte::grid::halfcoords const& rowcolhalf, bool after) const;
+        void resolve_selection();
+        void selection_maybe_swap_endpoints(vte::view::coords const& pos);
+        void modify_selection(vte::view::coords const& pos);
         bool cell_is_selected(vte::grid::column_t col,
                               vte::grid::row_t) const;
 

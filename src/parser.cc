@@ -253,14 +253,24 @@ static unsigned int vte_parse_charset_ocs(uint32_t raw,
         switch (VTE_SEQ_INTERMEDIATE(intermediates)) {
         case VTE_SEQ_INTERMEDIATE_NONE:  /* OCS with standard return */
                 if (remaining_intermediates == 0 &&
-                    raw >= 0x40 && raw < (0x40 + G_N_ELEMENTS(charset_ocs_with_return)))
-                        return charset_ocs_with_return[raw - 0x40];
+                    raw >= 0x30 && raw < (0x30 + G_N_ELEMENTS(charset_ocs)))
+                        return charset_ocs[raw - 0x30];
+                break;
+
+        case VTE_SEQ_INTERMEDIATE_SPACE: /* OCS with standard return */
+                if (remaining_intermediates == 0 &&
+                    raw >= 0x30 && raw < (0x30 + G_N_ELEMENTS(charset_ocs_with_2_0)))
+                        return charset_ocs_with_2_0[raw - 0x30];
+                /* Or should this return VTE_CHARSET_DRCS; ? */
+                break;
+
+        case VTE_SEQ_INTERMEDIATE_BANG ... VTE_SEQ_INTERMEDIATE_DOT: /* OCS with standard return */
                 break;
 
         case VTE_SEQ_INTERMEDIATE_SLASH: /* OCS without standard return */
                 if (remaining_intermediates == 0 &&
-                    raw >= 0x40 && raw < (0x40 + G_N_ELEMENTS(charset_ocs_without_return)))
-                        return charset_ocs_without_return[raw - 0x40];
+                    raw >= 0x40 && raw < (0x40 + G_N_ELEMENTS(charset_ocs_with_2_15)))
+                        return charset_ocs_with_2_15[raw - 0x40];
                 break;
         }
 
@@ -429,7 +439,13 @@ static unsigned int vte_parse_host_dcs(const struct vte_seq *seq)
 
 static unsigned int vte_parse_host_sci(const struct vte_seq *seq)
 {
-        return VTE_CMD_NONE;
+        switch (_VTE_SEQ_CODE(seq->terminator, 0)) {
+#define _VTE_SEQ(cmd,type,f,p,ni,i) \
+                case _VTE_SEQ_CODE(f, 0): return VTE_CMD_##cmd;
+#include "parser-sci.hh"
+#undef _VTE_SEQ
+        default: return VTE_CMD_NONE;
+        }
 }
 
 /*
@@ -936,7 +952,8 @@ static int parser_feed_to_state(struct vte_parser *parser, uint32_t raw)
                 /* Do the deferred clear and fallthrough to STATE_ESC */
                 parser_transition(parser, 0x1b /* ESC */, STATE_ESC,
                                   ACTION_CLEAR_INT);
-                /* fallthrough */
+
+                [[fallthrough]];
         case STATE_ESC:
                 switch (raw) {
                 case 0x00 ... 0x1a:        /* C0 \ { ESC } */

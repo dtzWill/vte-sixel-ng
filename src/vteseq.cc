@@ -316,8 +316,7 @@ Terminal::clear_current_line()
                 _vte_row_data_fill (rowdata, &m_fill_defaults, m_column_count);
 		rowdata->attr.soft_wrapped = 0;
 		/* Repaint this row. */
-		invalidate_cells(0, m_column_count,
-                                 m_screen->cursor.row, 1);
+                invalidate_row(m_screen->cursor.row);
 	}
 
 	/* We've modified the display.  Make a note of it. */
@@ -341,7 +340,7 @@ Terminal::clear_above_current()
                         _vte_row_data_fill (rowdata, &m_fill_defaults, m_column_count);
 			rowdata->attr.soft_wrapped = 0;
 			/* Repaint the row. */
-			invalidate_cells(0, m_column_count, i, 1);
+                        invalidate_row(i);
 		}
 	}
 	/* We've modified the display.  Make a note of it. */
@@ -377,7 +376,7 @@ Terminal::scroll_text(vte::grid::row_t scroll_amount)
 	}
 
 	/* Update the display. */
-        scroll_region(start, end - start + 1, scroll_amount);
+        invalidate_rows(start, end);
 
 	/* Adjust the scrollbars if necessary. */
         adjust_adjustments();
@@ -679,8 +678,7 @@ Terminal::clear_to_bol()
 		}
 	}
 	/* Repaint this row. */
-        invalidate_cells(0, m_screen->cursor.col+1,
-                         m_screen->cursor.row, 1);
+        invalidate_row(m_screen->cursor.row);
 
 	/* We've modified the display.  Make a note of it. */
         m_text_deleted_flag = TRUE;
@@ -735,8 +733,7 @@ Terminal::clear_below_current()
 		}
 		rowdata->attr.soft_wrapped = 0;
 		/* Repaint this row. */
-		invalidate_cells(0, m_column_count,
-                                 i, 1);
+                invalidate_row(i);
 	}
 
 	/* We've modified the display.  Make a note of it. */
@@ -775,8 +772,7 @@ Terminal::clear_to_eol()
 	}
 	rowdata->attr.soft_wrapped = 0;
 	/* Repaint this row. */
-	invalidate_cells(m_screen->cursor.col, m_column_count - m_screen->cursor.col,
-                         m_screen->cursor.row, 1);
+        invalidate_row(m_screen->cursor.row);
 }
 
 /*
@@ -908,8 +904,7 @@ Terminal::delete_character()
 			}
                         rowdata->attr.soft_wrapped = 0;
 			/* Repaint this row. */
-                        invalidate_cells(col, len - col,
-                                         m_screen->cursor.row, 1);
+                        invalidate_row(m_screen->cursor.row);
 		}
 	}
 
@@ -967,8 +962,7 @@ Terminal::erase_characters(long count)
 			}
 		}
 		/* Repaint this row. */
-                invalidate_cells(m_screen->cursor.col, count,
-                                 m_screen->cursor.row, 1);
+                invalidate_row(m_screen->cursor.row);
 	}
 
 	/* We've modified the display.  Make a note of it. */
@@ -1082,8 +1076,7 @@ Terminal::move_cursor_tab_forward(int count)
                 }
         }
 
-        invalidate_cells(m_screen->cursor.col, newcol - m_screen->cursor.col,
-                         m_screen->cursor.row, 1);
+        invalidate_row(m_screen->cursor.row);
         m_screen->cursor.col = newcol;
 }
 
@@ -1299,7 +1292,7 @@ Terminal::insert_lines(vte::grid::row_t param)
 	}
         m_screen->cursor.col = 0;
 	/* Update the display. */
-        scroll_region(row, end - row + 1, param);
+        invalidate_rows(row, end);
 	/* Adjust the scrollbars if necessary. */
         adjust_adjustments();
 	/* We've modified the display.  Make a note of it. */
@@ -1334,7 +1327,7 @@ Terminal::delete_lines(vte::grid::row_t param)
 	}
         m_screen->cursor.col = 0;
 	/* Update the display. */
-        scroll_region(row, end - row + 1, -param);
+        invalidate_rows(row, end);
 	/* Adjust the scrollbars if necessary. */
         adjust_adjustments();
 	/* We've modified the display.  Make a note of it. */
@@ -1674,13 +1667,34 @@ Terminal::ACS(vte::parser::Sequence const& seq)
          *
          * The final byte of the sequence identifies the facility number
          * from 1 to 62 starting with 4/01.
+         * DEC uses some final characters in the 3/00..3/15 range for
+         * private purposes.
          *
          * References: ECMA-35 § 15.2
+         *             DEC VT525
+         *             DEC PPLV2
          */
 
         /* Since we mostly don't implement ECMA-35 anymore, we can mostly ignore this */
 
-        switch (seq.terminator() - 0x40) {
+        switch (int(seq.terminator()) - 0x40) {
+        case -10: /* '6' */
+                /* S7C1R/DECTC1 - truncate C1 controls
+                 *
+                 * Masks the high bit from C1 controls and then
+                 * processes them as if received like that.
+                 *
+                 * References: DEC PPLV2
+                 */
+                 break;
+        case -9: /* '7' */
+                /* S8C1R/DECAC1 - accept C1 controls
+                 *
+                 * Accept both C0 and C1 controls.
+                 *
+                 * References: DEC PPLV2
+                 */
+                 break;
         case 6:
                 /*
                  * This causes the terminal to start sending C1 controls as 7bit
@@ -4227,6 +4241,34 @@ Terminal::DECSFC(vte::parser::Sequence const& seq)
 }
 
 void
+Terminal::DECSGR(vte::parser::Sequence const& seq)
+{
+        /*
+         * DECSGR - DEC select graphics rendition
+         * Selects the character attributes to use for newly inserted
+         * characters.
+         *
+         * Arguments:
+         *   args[0:]: the attributes
+         *     0 = reset all attributes (deprecated; same as SGR 0)
+         *     4 = set superscript and reset subscript
+         *     5 = set subscript and reset superscript
+         *     6 = set overline (deprecated; same as SGR 53)
+         *     8 = set transparency mode
+         *     24 = reset superscript and subscript
+         *     26 = reset overline (deprecated; same as SGR 55)
+         *     28 = reset transparency mode
+         *
+         * Defaults:
+         *   args[0]: 0 (reset all attributes)
+         *
+         * References: DEC PPLV2
+         *             DEC LJ250
+         */
+        /* TODO: consider implementing sub/superscript? */
+}
+
+void
 Terminal::DECSIXEL(vte::parser::Sequence const& seq)
 {
         /*
@@ -4343,19 +4385,36 @@ Terminal::DECSLRM(vte::parser::Sequence const& seq)
          *
          * References: VT525
          *
-         * Note: There is a conflict between SCOSC and DECSLRM that both
-         * have final character 's' (7/3). SCOSC has 0 parameters, and
-         * DECSLRM has 2 parameters which both have default values, and
-         * my reading of ECMA-48 § 5.4.2h says that this allows for an
-         * empty parameter string to represent them.
-         *
-         * We could either fudge it by dispatching zero params to SCOSC
-         * and anything else to DECSLRM, or, since we already implement
-         * DECSC/DECRC, we can just drop support for the extra SCOSC/SCORC.
-         * Do the latter.
-         *
          * FIXMEchpe: Consider implementing this.
          */
+}
+
+void
+Terminal::DECSLRM_OR_SCOSC(vte::parser::Sequence const& seq)
+{
+        /*
+         * set left and right margins or SCO restore cursor - DECSLRM or SCOSC
+         * There is a conflict between SCOSC and DECSLRM that both are
+         * CSI s (CSI 7/3). SCOSC has 0 parameters, and DECSLRM has 2
+         * parameters which both have default values, and my reading
+         * of ECMA-48 § 5.4.2h says that this allows for an empty
+         * parameter string to represent them.
+         *
+         * While the DEC manuals say that SCOSC/SCORC only operates in
+         * "SCO Console Mode" (which is entered by DECTME 13), and not in
+         * "VT mode" (i.e. native mode), we instead distinguish the cases
+         * by private mode DECLRMM: If DECLRMM is set, dispatch DECSLRM;
+         * if it's reset, dispatch SCOSC.
+         *
+         * See issue #48.
+         */
+
+#ifdef PARSER_INCLUDE_NOP
+        if (m_modes_private.DECLRMM())
+                DECSLRM(seq);
+        else
+#endif
+                SCOSC(seq);
 }
 
 void
@@ -6651,9 +6710,7 @@ Terminal::RI(vte::parser::Sequence const& seq)
 		ring_remove(end);
 		ring_insert(start, true);
 		/* Update the display. */
-		scroll_region(start, end - start + 1, 1);
-                invalidate_cells(0, m_column_count,
-                                 start, 2);
+                invalidate_rows(start, end);
 	} else {
 		/* Otherwise, just move the cursor up. */
                 m_screen->cursor.row--;
@@ -6723,12 +6780,35 @@ void
 Terminal::SCORC(vte::parser::Sequence const& seq)
 {
         /*
-         * SCORC - SCO restore-cursor
+         * SCORC - SCO restore cursor
+         * Works like DECRC, except in that it does not restore the page.
+         * While this is an obsolete sequence from an obsolete terminal,
+         * and not used in terminfo, there still are some programmes
+         * that use it and break when it's not implemented; see issue#48.
          *
          * References: VT525
-         *
-         * Not worth implementing, given that we already support DECSC/DECRC.
          */
+
+        if (m_modes_private.DECLRMM())
+                return;
+
+        restore_cursor();
+}
+
+void
+Terminal::SCOSC(vte::parser::Sequence const& seq)
+{
+        /*
+         * SCORC - SCO save cursor
+         * Works like DECSC, except in that it does not save the page.
+         * While this is an obsolete sequence from an obsolete terminal,
+         * and not used in terminfo, there still are some programmes
+         * that use it and break when it's not implemented; see issue#48.
+         *
+         * References: VT525
+         */
+
+        save_cursor();
 }
 
 void
@@ -6989,6 +7069,7 @@ Terminal::SGR(vte::parser::Sequence const& seq)
                         break;
                 }
                 case VTE_SGR_SET_BLINK:
+                case VTE_SGR_SET_BLINK_RAPID:
                         m_defaults.attr.set_blink(true);
                         break;
                 case VTE_SGR_SET_REVERSE:
@@ -8109,6 +8190,31 @@ Terminal::XDGSYNC(vte::parser::Sequence const& seq)
          */
 
         /* TODO: implement this! https://gitlab.gnome.org/GNOME/vte/issues/15 */
+}
+
+void
+Terminal::XTERM_CHECKSUM_MODE(vte::parser::Sequence const& seq)
+{
+        /*
+         * XTERM_CHECKSUM_MODE - xterm DECRQCRA checksum mode
+         * Sets how DECRQCRA calculates the area checksum.
+         *
+         * Arguments:
+         *   args[0]: flag value composed of the following flags:
+         *     1: no negation
+         *     2: don't report attributes
+         *     4: checksum trailing blanks
+         *     8: don't checksum empty cells
+         *     16: no 8-bit masking or ignoring combining characters
+         *     32: no 7-bit masking
+         *
+         * Defaults:
+         *   args[0]: 0, matching the output from VTxxx terminals
+         *
+         * References: XTERM (since 335)
+         *
+         * Probably not worth implementing.
+         */
 }
 
 void

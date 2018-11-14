@@ -118,6 +118,7 @@ _VTE_NOQ(SCP,                    CSI,    'k',  NONE,  1, SPACE    ) /* select ch
 _VTE_SEQ(RM_ECMA,                CSI,    'l',  NONE,  0, NONE     ) /* reset-mode-ecma */
 _VTE_SEQ(RM_DEC,                 CSI,    'l',  WHAT,  0, NONE     ) /* reset-mode-dec */
 _VTE_SEQ(SGR,                    CSI,    'm',  NONE,  0, NONE     ) /* select-graphics-rendition */
+_VTE_NOQ(DECSGR,                 CSI,    'm',  WHAT,  0, NONE     ) /* DEC select graphics rendition */
 _VTE_NOQ(XTERM_SRV,              CSI,    'm',  GT,    0, NONE     ) /* xterm-set-resource-value */
 _VTE_SEQ(DSR_ECMA,               CSI,    'n',  NONE,  0, NONE     ) /* device-status-report-ecma */
 _VTE_NOQ(XTERM_RRV,              CSI,    'n',  GT,    0, NONE     ) /* xterm-reset-resource-value */
@@ -150,7 +151,7 @@ _VTE_NOQ(DECSCS,                 CSI,    'r',  NONE,  1, MULT     ) /* select-co
 _VTE_NOQ(DECSMKR,                CSI,    'r',  NONE,  1, PLUS     ) /* select-modifier-key-reporting */
 _VTE_NOQ(DECSEST,                CSI,    'r',  NONE,  1, MINUS    ) /* energy saver time */
 _VTE_SEQ(DECPCTERM_OR_XTERM_RPM, CSI,    'r',  WHAT,  0, NONE     ) /* pcterm or xterm restore DEC private mode */
-_VTE_SEQ(DECSLRM,                CSI,    's',  NONE,  0, NONE     ) /* set-left-and-right-margins */
+_VTE_SEQ(DECSLRM_OR_SCOSC,       CSI,    's',  NONE,  0, NONE     ) /* set left and right margins or SCO save cursor */
 _VTE_NOQ(DECSPRTT,               CSI,    's',  NONE,  1, CASH     ) /* select-printer-type */
 _VTE_NOQ(DECSFC,                 CSI,    's',  NONE,  1, MULT     ) /* select-flow-control */
 _VTE_SEQ(XTERM_SPM,              CSI,    's',  WHAT,  0, NONE     ) /* xterm save private mode */
@@ -159,7 +160,7 @@ _VTE_NOQ(DECSWBV,                CSI,    't',  NONE,  1, SPACE    ) /* set-warni
 _VTE_NOQ(DECSRFR,                CSI,    't',  NONE,  1, DQUOTE   ) /* select-refresh-rate */
 _VTE_NOQ(DECRARA,                CSI,    't',  NONE,  1, CASH     ) /* reverse-attributes-in-rectangular-area */
 _VTE_NOQ(XTERM_STM,              CSI,    't',  GT,    0, NONE     ) /* xterm-set-title-mode */
-_VTE_NOQ(SCORC,                  CSI,    'u',  NONE,  0, NONE     ) /* SCO restore-cursor */
+_VTE_SEQ(SCORC,                  CSI,    'u',  NONE,  0, NONE     ) /* SCO restore cursor */
 _VTE_NOQ(DECSMBV,                CSI,    'u',  NONE,  1, SPACE    ) /* set-margin-bell-volume */
 _VTE_NOQ(DECSTRL,                CSI,    'u',  NONE,  1, DQUOTE   ) /* set-transmit-rate-limit */
 _VTE_SEQ(DECRQTSR,               CSI,    'u',  NONE,  1, CASH     ) /* request-terminal-state-report */
@@ -182,6 +183,7 @@ _VTE_NOQ(DECSACE,                CSI,    'x',  NONE,  1, MULT     ) /* select-at
 _VTE_NOQ(DECRQPKFM,              CSI,    'x',  NONE,  1, PLUS     ) /* request-program-key-free-memory */
 _VTE_NOQ(DECSPMA,                CSI,    'x',  NONE,  1, COMMA    ) /* session page memory allocation */
 _VTE_NOQ(DECTST,                 CSI,    'y',  NONE,  0, NONE     ) /* invoke-confidence-test */
+_VTE_NOQ(XTERM_CHECKSUM_MODE,    CSI,    'y',  NONE,  1, HASH     ) /* xterm DECRQCRA checksum mode */
 _VTE_SEQ(DECRQCRA,               CSI,    'y',  NONE,  1, MULT     ) /* request-checksum-of-rectangular-area */
 _VTE_NOQ(DECPKFMR,               CSI,    'y',  NONE,  1, PLUS     ) /* program-key-free-memory-report */
 _VTE_NOQ(DECUS,                  CSI,    'y',  NONE,  1, COMMA    ) /* update session */

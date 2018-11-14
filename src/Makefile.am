@@ -68,10 +68,13 @@ libvte_@VTE_API_MAJOR_VERSION@_@VTE_API_MINOR_VERSION@_la_SOURCES = \
 	parser-c01.hh \
 	parser-csi.hh \
 	parser-dcs.hh \
+	parser-decsgr.hh \
 	parser-esc.hh \
 	parser-glue.hh \
 	parser-osc.hh \
 	parser-reply.hh \
+	parser-sci.hh \
+	parser-sgr.hh \
 	parser-string.hh \
 	pty.cc \
 	refptr.hh \
@@ -246,10 +249,13 @@ parser_cat_SOURCES = \
 	parser-c01.hh \
 	parser-csi.hh \
 	parser-dcs.hh \
+	parser-decsgr.hh \
 	parser-esc.hh \
 	parser-glue.hh \
 	parser-osc.hh \
 	parser-reply.hh \
+	parser-sci.hh \
+	parser-sgr.hh \
 	parser-string.hh \
 	parser-cat.cc \
 	utf8.cc \
@@ -287,10 +293,13 @@ test_parser_SOURCES = \
 	parser-c01.hh \
 	parser-csi.hh \
 	parser-dcs.hh \
+	parser-decsgr.hh \
 	parser-esc.hh \
 	parser-glue.hh \
 	parser-osc.hh \
 	parser-reply.hh \
+	parser-sci.hh \
+	parser-sgr.hh \
 	parser-string.hh \
 	$(NULL)
 test_parser_CPPFLAGS = \

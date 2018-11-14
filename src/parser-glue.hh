@@ -162,6 +162,17 @@ public:
                 return (introducer() & 0x80) != 0;
         }
 
+        /* intermediates:
+         *
+         * This is the pintro and intermediate characters in the sequence, if any.
+         *
+         * Returns: the intermediates
+         */
+        inline constexpr unsigned int intermediates() const noexcept
+        {
+                return m_seq->intermediates;
+        }
+
         // FIXMEchpe: upgrade to C++17 and use the u32string_view version below, instead
         /*
          * string:
@@ -270,7 +281,7 @@ public:
                                    int max_v) const noexcept
         {
                 auto v = param(idx, default_v);
-                return std::min(std::max(v, min_v), max_v);
+                return std::clamp(v, min_v, max_v);
         }
 
         /* param_nonfinal:
@@ -370,7 +381,7 @@ public:
                                       int max_v) const noexcept
         {
                 int v = __builtin_expect(idx < size(), 1) ? vte_seq_arg_value_final(m_seq->args[idx], default_v) : default_v;
-                return std::min(std::max(v, min_v), max_v);
+                return std::clamp(v, min_v, max_v);
         }
 
         /* collect_subparams:
@@ -476,6 +487,8 @@ public:
 
         SequenceBuilder& operator= (SequenceBuilder const&) = delete;
         SequenceBuilder& operator= (SequenceBuilder&&) = delete;
+
+        inline constexpr unsigned int type() const noexcept { return m_seq.type; }
 
         inline void set_type(unsigned int type) noexcept
         {
